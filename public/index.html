@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kold Kall — Simulateur de Cold Call</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════════
+       ÉCRAN DE LOGIN
+  ═══════════════════════════════════════════════════ -->
+  <div id="login-screen" class="login-screen">
+    <div class="login-card">
+
+      <div class="login-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+        </div>
+        <h1 class="login-title">Kold Kall</h1>
+        <p class="login-subtitle">Simulateur de cold calling IA</p>
+      </div>
+
+      <!-- Formulaire login -->
+      <form id="login-form" novalidate>
+        <div class="field-group">
+          <label class="field-label" for="login-email">Email</label>
+          <input id="login-email" class="field-input" type="email" placeholder="ton@email.com" autocomplete="email" required />
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="login-password">Mot de passe</label>
+          <div class="field-input-wrap">
+            <input id="login-password" class="field-input" type="password" placeholder="••••••••" autocomplete="current-password" required />
+            <button type="button" class="btn-eye" id="toggle-eye-login" aria-label="Afficher le mot de passe">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <p id="login-error" class="auth-message error-msg" aria-live="polite"></p>
+        <button id="login-btn" class="btn-primary" type="submit">Se connecter</button>
+        <div class="auth-links">
+          <button type="button" id="btn-forgot" class="btn-link">Mot de passe oublié ?</button>
+          <button type="button" id="btn-show-signup" class="btn-link">Créer un compte</button>
+        </div>
+      </form>
+
+      <!-- Formulaire signup -->
+      <div id="signup-panel" class="hidden">
+        <div class="field-group">
+          <label class="field-label" for="signup-prenom">Prénom</label>
+          <input id="signup-prenom" class="field-input" type="text" placeholder="Jean" />
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="signup-nom">Nom</label>
+          <input id="signup-nom" class="field-input" type="text" placeholder="Dupont" />
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="signup-email">Email</label>
+          <input id="signup-email" class="field-input" type="email" placeholder="ton@email.com" />
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="signup-password">Mot de passe</label>
+          <div class="field-input-wrap">
+            <input id="signup-password" class="field-input" type="password" placeholder="••••••••" />
+            <button type="button" class="btn-eye" id="toggle-eye-signup" aria-label="Afficher le mot de passe">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <p id="signup-error" class="auth-message error-msg" aria-live="polite"></p>
+        <p id="signup-success" class="auth-message success-msg" aria-live="polite"></p>
+        <button id="signup-btn" class="btn-primary">Créer mon compte</button>
+        <div class="auth-links">
+          <button type="button" id="btn-show-login" class="btn-link">← Retour à la connexion</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════
+       APP PRINCIPALE
+  ═══════════════════════════════════════════════════ -->
+  <div id="app-screen" class="app-shell hidden">
+
+    <header class="topbar">
+      <div class="topbar-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+        </div>
+        <span class="brand-name">Kold Kall</span>
+        <span class="brand-tag">V0</span>
+      </div>
+      <div class="topbar-actions">
+        <span class="user-greeting">Bonjour, <strong id="user-name"></strong></span>
+        <button class="btn-persona-trigger" id="btn-persona" aria-haspopup="dialog">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span id="persona-badge">Prospect Direct</span>
+          <svg class="icon-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="content-area">
+      <section class="orb-section" aria-live="polite">
+        <div class="orb-container" id="orb-container" data-state="idle">
+          <div class="ring ring-3"></div>
+          <div class="ring ring-2"></div>
+          <div class="ring ring-1"></div>
+          <div class="orb-core">
+            <div class="orb-glow"></div>
+            <div class="orb-icon-wrap" id="orb-icon-wrap">
+              <svg id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+              <svg id="icon-wave" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h2"/><path d="M6 6v12"/><path d="M10 4v16"/><path d="M14 6v12"/><path d="M18 9v6"/><path d="M22 12h0"/></svg>
+              <svg id="icon-loader" class="hidden spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+              <svg id="icon-sound" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+              <svg id="icon-error" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+            </div>
+          </div>
+        </div>
+        <p class="status-label" id="status-label" aria-live="polite">Prêt à écouter</p>
+        <canvas class="audio-viz" id="audio-viz" width="280" height="48"></canvas>
+      </section>
+
+      <div class="transcript-live" id="transcript-live" aria-live="polite"></div>
+
+      <div class="conversation-divider"><span>Conversation</span></div>
+
+      <div class="conversation scrollable-zone" id="conversation" role="log" aria-live="polite">
+        <div class="conv-empty" id="conv-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <p>Ta simulation apparaîtra ici</p>
+          <span>Clique sur le bouton ci-dessous pour commencer</span>
+        </div>
+      </div>
+    </main>
+
+    <footer class="bottom-bar">
+      <button class="btn-end hidden" id="btn-end">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="5" y="5" rx="2"/></svg>
+        Terminer
+      </button>
+      <button class="btn-mic" id="btn-mic" aria-label="Commencer à parler">
+        <div class="btn-mic-disc" id="btn-mic-disc">
+          <svg class="mic-icon" id="mic-icon-default" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          <svg class="mic-icon hidden" id="mic-icon-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="5" y="5" rx="2"/></svg>
+        </div>
+        <span class="btn-mic-label" id="btn-mic-label">Parler</span>
+      </button>
+    </footer>
+
+    <!-- Modal scénario -->
+    <div class="modal-overlay hidden" id="modal-overlay" role="dialog" aria-modal="true">
+      <div class="persona-sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <div>
+            <h2 class="sheet-title">Choisir un scénario</h2>
+            <p class="sheet-subtitle">Le type de prospect que tu vas appeler</p>
+          </div>
+          <button class="btn-sheet-close" id="btn-sheet-close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+        <div class="persona-grid" id="persona-grid"></div>
+        <p class="sheet-note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          Changer de scénario réinitialise la conversation.
+        </p>
+      </div>
+    </div>
+
+    <!-- Modal bilan -->
+    <div class="modal-overlay hidden" id="bilan-modal" role="dialog" aria-modal="true">
+      <div class="bilan-sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <div>
+            <h2 class="sheet-title">Bilan de ta simulation</h2>
+            <p class="sheet-subtitle">Analyse par Gemini 3.1 Pro</p>
+          </div>
+          <button class="btn-sheet-close" id="btn-bilan-close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+        <div class="bilan-note-wrap">
+          <span class="bilan-note-label">Note globale</span>
+          <span class="bilan-note" id="bilan-note">—/10</span>
+        </div>
+        <div class="bilan-sections">
+          <div class="bilan-section">
+            <div class="bilan-section-title"><span class="bilan-dot dot-green"></span>Ce que tu as bien fait</div>
+            <p id="bilan-positifs" class="bilan-text"></p>
+          </div>
+          <div class="bilan-section">
+            <div class="bilan-section-title"><span class="bilan-dot dot-red"></span>À améliorer</div>
+            <p id="bilan-negatifs" class="bilan-text"></p>
+          </div>
+          <div class="bilan-section">
+            <div class="bilan-section-title"><span class="bilan-dot dot-blue"></span>Conseils concrets</div>
+            <p id="bilan-conseils" class="bilan-text"></p>
+          </div>
+        </div>
+        <button class="btn-primary" id="btn-new-simulation">Nouvelle simulation</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
