@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kold Kall — Simulateur de Cold Call</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+
+  <!-- ═══════════════════════════════════════════════════
+       ÉCRAN DE LOGIN
+  ═══════════════════════════════════════════════════ -->
+  <div id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+        </div>
+        <h1 class="login-title">Kold Kall</h1>
+        <p class="login-subtitle">Connecte-toi pour commencer ta simulation</p>
+      </div>
+
+      <form id="login-form" class="login-form" novalidate>
+        <div class="field-group">
+          <label class="field-label" for="login-email">Email</label>
+          <input
+            id="login-email"
+            class="field-input"
+            type="email"
+            placeholder="ton@email.com"
+            autocomplete="email"
+            required
+          />
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="login-password">Mot de passe</label>
+          <input
+            id="login-password"
+            class="field-input"
+            type="password"
+            placeholder="••••••••"
+            autocomplete="current-password"
+            required
+          />
+        </div>
+
+        <p id="login-error" class="login-error" aria-live="polite"></p>
+
+        <button id="login-btn" class="btn-login" type="submit">
+          Se connecter
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════
+       APP PRINCIPALE
+  ═══════════════════════════════════════════════════ -->
+  <div id="app-screen" class="app-shell hidden">
+
+    <!-- TOPBAR -->
+    <header class="topbar">
+      <div class="topbar-brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+        </div>
+        <span class="brand-name">Kold Kall</span>
+        <span class="brand-tag">V0</span>
+      </div>
+
+      <div class="topbar-actions">
+        <span class="user-greeting">Bonjour, <strong id="user-name"></strong></span>
+        <button class="btn-persona-trigger" id="btn-persona" title="Changer le scénario" aria-haspopup="dialog">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+          <span id="persona-badge">Prospect Direct</span>
+          <svg class="icon-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m6 9 6 6 6-6"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- CONTENU PRINCIPAL -->
+    <main class="content-area" id="content-area">
+
+      <!-- Orb -->
+      <section class="orb-section" aria-label="État de l'agent" aria-live="polite">
+        <div class="orb-container" id="orb-container" data-state="idle">
+          <div class="ring ring-3" aria-hidden="true"></div>
+          <div class="ring ring-2" aria-hidden="true"></div>
+          <div class="ring ring-1" aria-hidden="true"></div>
+          <div class="orb-core" id="orb-core" aria-hidden="true">
+            <div class="orb-glow"></div>
+            <div class="orb-icon-wrap" id="orb-icon-wrap">
+              <svg id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" x2="12" y1="19" y2="22"/>
+              </svg>
+              <svg id="icon-wave" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 12h2"/><path d="M6 6v12"/><path d="M10 4v16"/><path d="M14 6v12"/><path d="M18 9v6"/><path d="M22 12h0"/>
+              </svg>
+              <svg id="icon-loader" class="hidden spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+              </svg>
+              <svg id="icon-sound" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+              </svg>
+              <svg id="icon-error" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" x2="12" y1="8" y2="12"/>
+                <line x1="12" x2="12.01" y1="16" y2="16"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+        <p class="status-label" id="status-label" aria-live="polite">Prêt à écouter</p>
+        <canvas class="audio-viz" id="audio-viz" width="280" height="48" aria-hidden="true"></canvas>
+      </section>
+
+      <!-- Transcription live -->
+      <div class="transcript-live" id="transcript-live" aria-live="polite"></div>
+
+      <!-- Séparateur -->
+      <div class="conversation-divider" id="conv-divider">
+        <span>Conversation</span>
+      </div>
+
+      <!-- Historique -->
+      <div class="conversation scrollable-zone" id="conversation" role="log" aria-label="Historique de conversation" aria-live="polite">
+        <div class="conv-empty" id="conv-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <p>Votre simulation apparaîtra ici</p>
+          <span>Cliquez sur le bouton ci-dessous pour commencer</span>
+        </div>
+      </div>
+
+    </main>
+
+    <!-- BARRE DU BAS -->
+    <footer class="bottom-bar">
+      <button class="btn-end hidden" id="btn-end" aria-label="Terminer la simulation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect width="14" height="14" x="5" y="5" rx="2"/>
+        </svg>
+        Terminer
+      </button>
+
+      <button class="btn-mic" id="btn-mic" aria-label="Commencer à parler">
+        <div class="btn-mic-disc" id="btn-mic-disc">
+          <svg class="mic-icon" id="mic-icon-default" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+          <svg class="mic-icon hidden" id="mic-icon-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="14" height="14" x="5" y="5" rx="2"/>
+          </svg>
+        </div>
+        <span class="btn-mic-label" id="btn-mic-label">Parler</span>
+      </button>
+    </footer>
+
+    <!-- MODAL PERSONA -->
+    <div class="modal-overlay hidden" id="modal-overlay" role="dialog" aria-modal="true" aria-label="Sélection du scénario">
+      <div class="persona-sheet" id="persona-sheet">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <div class="sheet-header">
+          <div>
+            <h2 class="sheet-title">Choisir un scénario</h2>
+            <p class="sheet-subtitle">Le type de prospect que tu vas appeler</p>
+          </div>
+          <button class="btn-sheet-close" id="btn-sheet-close" aria-label="Fermer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+            </svg>
+          </button>
+        </div>
+        <div class="persona-grid" id="persona-grid"></div>
+        <p class="sheet-note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>
+          </svg>
+          Changer de scénario réinitialise la conversation.
+        </p>
+      </div>
+    </div>
+
+    <!-- MODALE BILAN -->
+    <div class="modal-overlay hidden" id="bilan-modal" role="dialog" aria-modal="true" aria-label="Bilan de simulation">
+      <div class="bilan-sheet">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <div class="sheet-header">
+          <div>
+            <h2 class="sheet-title">Bilan de ta simulation</h2>
+            <p class="sheet-subtitle">Analyse par intelligence artificielle</p>
+          </div>
+          <button class="btn-sheet-close" id="btn-bilan-close" aria-label="Fermer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="bilan-note-wrap">
+          <span class="bilan-note-label">Note globale</span>
+          <span class="bilan-note" id="bilan-note">—/10</span>
+        </div>
+
+        <div class="bilan-sections">
+          <div class="bilan-section bilan-positifs">
+            <div class="bilan-section-title">
+              <span class="bilan-dot dot-green"></span>
+              Ce que tu as bien fait
+            </div>
+            <p id="bilan-positifs" class="bilan-text"></p>
+          </div>
+
+          <div class="bilan-section bilan-negatifs">
+            <div class="bilan-section-title">
+              <span class="bilan-dot dot-red"></span>
+              À améliorer
+            </div>
+            <p id="bilan-negatifs" class="bilan-text"></p>
+          </div>
+
+          <div class="bilan-section bilan-conseils">
+            <div class="bilan-section-title">
+              <span class="bilan-dot dot-blue"></span>
+              Conseils concrets
+            </div>
+            <p id="bilan-conseils" class="bilan-text"></p>
+          </div>
+        </div>
+
+        <button class="btn-new-simulation" id="btn-new-simulation">
+          Nouvelle simulation
+        </button>
+      </div>
+    </div>
+
+  </div><!-- /.app-shell -->
+
+  <script src="app.js"></script>
+</body>
+</html>
