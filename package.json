@@ -1,0 +1,25 @@
+{
+  "name": "agent-vocal",
+  "version": "0.1.0",
+  "description": "Agent vocal IA — Deepgram nova-3 + Gemini 3.5 Flash Lite + Cartesia sonic-3.5",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "start:callbot": "node server-callbot.js",
+    "dev:callbot": "node --watch server-callbot.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0",
+    "@google/genai": "^2.17.0",
+    "dotenv": "^16.4.5",
+    "express": "^5.0.1",
+    "pdfkit": "^0.18.0",
+    "ws": "^8.21.0",
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
