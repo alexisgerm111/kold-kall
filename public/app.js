@@ -1,687 +1,974 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  KOLD KALL V0 — Logique Frontend
-//  Auth complète : login, signup, mot de passe oublié, œil MDP
-//  Pipeline : Deepgram → Gemini 3.5 Flash Lite → Cartesia
-//  Simulation : enregistrement Supabase + bilan Gemini 3.1 Pro Preview
+//  KOLD KALL V1 — app.js
+//  Flow : Login → Config → Génération persona → Briefing → Session vocale
 // ════════════════════════════════════════════════════════════════════════════
 
 'use strict';
 
-// ─── PERSONAS ────────────────────────────────────────────────────────────────
-const PERSONAS = [
-  {
-    id         : 'prospect_direct',
-    name       : 'Prospect Direct',
-    description: 'Décideur à appeler directement',
-    color      : '#2563EB',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
-    systemPrompt: `Tu joues le rôle d'un prospect (décideur en entreprise) qui reçoit un appel téléphonique commercial à froid. Tu parles en français de façon naturelle. Tu peux être poli mais occupé, légèrement méfiant, parfois intéressé si le commercial est convaincant. Tu poses des objections réalistes (pas le temps, déjà un prestataire, prix...). Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Reste réaliste, pas caricatural. Pas de listes ni de markdown.`
+// ─── État global ─────────────────────────────────────────────────────────────
+const STATE = {
+  user          : null,
+  currentConfig : {
+    type      : 'b2b',
+    mode      : 'cold_call',
+    subMode   : 'complet',
+    canal     : 'fixe',
+    difficulty: 'facile',
+    secteur   : '',
+    poste     : '',
+    taille    : 'pme',
+    produit   : ''
   },
-  {
-    id         : 'barrage_secretaire',
-    name       : 'Secrétaire Barrage',
-    description: 'Brigitte — filtre les appels',
-    color      : '#DC2626',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>`,
-    systemPrompt: `Tu joues le rôle de Brigitte, secrétaire de direction qui filtre les appels commerciaux pour protéger son patron. Tu parles en français de façon professionnelle mais ferme. Tu demandes systématiquement l'objet de l'appel, tu interroges sur la relation avec le patron, tu peux dire qu'il est en réunion. Si le commercial est vraiment habile et convaincant, tu peux éventuellement passer l'appel. Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Pas de listes ni de markdown.`
-  },
-  {
-    id         : 'client_difficile',
-    name       : 'Client Difficile',
-    description: 'Sceptique et exigeant',
-    color      : '#D97706',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
-    systemPrompt: `Tu joues le rôle d'un prospect sceptique et exigeant pour entraîner des commerciaux. Tu parles en français de façon directe et parfois abrupte. Tu poses des objections sur le prix, tu compares avec la concurrence, tu demandes des preuves concrètes. Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Tu restes réaliste, pas caricatural. Pas de listes ni de markdown.`
-  }
-];
+  currentPersona   : null,   // { prenom, poste_exact, structure, ... systemBlock }
+  simulationId     : null,
+  conversationHistory : [],
+  fullTranscription   : [],
+  sessionStartTime    : null,
+  timerInterval       : null,
 
-// ─── ÉTAT GLOBAL ──────────────────────────────────────────────────────────────
-const State = Object.freeze({
-  IDLE     : 'idle',
-  LISTENING: 'listening',
-  THINKING : 'thinking',
-  SPEAKING : 'speaking',
-  ERROR    : 'error'
-});
+  // Audio
+  deepgramSocket  : null,
+  mediaRecorder   : null,
+  audioCtx        : null,
+  analyser        : null,
+  vizRaf          : null,
+  ttsSource       : null,
+  isSpeaking      : false,
+};
 
-let currentState        = State.IDLE;
-let currentPersonaId    = 'prospect_direct';
-let conversationHistory = [];
-let isProcessing        = false;
+// ─── Utilitaires ─────────────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const show = el => el.classList.remove('hidden');
+const hide = el => el.classList.add('hidden');
 
-// Session
-let currentUser         = null;
-let currentProfile      = null;
-let currentSimulationId = null;
-let simulationStartTime = null;
-let fullTranscription   = [];
-
-// Audio/réseau
-let deepgramSocket  = null;
-let mediaRecorder   = null;
-let audioStream     = null;
-let keepAliveTimer  = null;
-let audioCtx        = null;
-let analyserNode    = null;
-let vizFrame        = null;
-
-// ─── DOM ──────────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
-
-// Écrans
-const loginScreen    = $('login-screen');
-const appScreen      = $('app-screen');
-
-// Login
-const loginForm      = $('login-form');
-const loginEmail     = $('login-email');
-const loginPassword  = $('login-password');
-const loginBtn       = $('login-btn');
-const loginError     = $('login-error');
-const toggleEyeLogin = $('toggle-eye-login');
-const btnShowSignup  = $('btn-show-signup');
-const btnForgot      = $('btn-forgot');
-
-// Signup
-const signupPanel    = $('signup-panel');
-const signupNom      = $('signup-nom');
-const signupPrenom   = $('signup-prenom');
-const signupEmail    = $('signup-email');
-const signupPassword = $('signup-password');
-const signupBtn      = $('signup-btn');
-const signupError    = $('signup-error');
-const signupSuccess  = $('signup-success');
-const toggleEyeSignup= $('toggle-eye-signup');
-const btnShowLogin   = $('btn-show-login');
-
-// App
-const userNameEl     = $('user-name');
-const orbContainer   = $('orb-container');
-const statusLabel    = $('status-label');
-const transcriptLive = $('transcript-live');
-const conversation   = $('conversation');
-const convEmpty      = $('conv-empty');
-const btnMic         = $('btn-mic');
-const btnMicLabel    = $('btn-mic-label');
-const btnEnd         = $('btn-end');
-const btnPersona     = $('btn-persona');
-const personaBadge   = $('persona-badge');
-const modalOverlay   = $('modal-overlay');
-const btnSheetClose  = $('btn-sheet-close');
-const personaGrid    = $('persona-grid');
-const audioViz       = $('audio-viz');
-
-// Bilan
-const bilanModal     = $('bilan-modal');
-const bilanNote      = $('bilan-note');
-const bilanPositifs  = $('bilan-positifs');
-const bilanNegatifs  = $('bilan-negatifs');
-const bilanConseils  = $('bilan-conseils');
-const btnBilanClose  = $('btn-bilan-close');
-const btnNewSim      = $('btn-new-simulation');
-
-// Icônes orb
-const iconMic        = $('icon-mic');
-const iconWave       = $('icon-wave');
-const iconLoader     = $('icon-loader');
-const iconSound      = $('icon-sound');
-const iconError      = $('icon-error');
-
-// Icônes bouton mic
-const micIconDefault = $('mic-icon-default');
-const micIconStop    = $('mic-icon-stop');
-
-// ════════════════════════════════════════════════════════════════════════════
-//  INIT
-// ════════════════════════════════════════════════════════════════════════════
-
-function init() {
-  // Login
-  loginForm.addEventListener('submit', handleLogin);
-  toggleEyeLogin.addEventListener('click', () => togglePasswordVisibility(loginPassword, toggleEyeLogin));
-  btnShowSignup.addEventListener('click', showSignupPanel);
-  btnForgot.addEventListener('click', handleForgotPassword);
-
-  // Signup
-  signupBtn.addEventListener('click', handleSignup);
-  toggleEyeSignup.addEventListener('click', () => togglePasswordVisibility(signupPassword, toggleEyeSignup));
-  btnShowLogin.addEventListener('click', showLoginPanel);
-
-  // App
-  btnMic.addEventListener('click', handleMicClick);
-  btnEnd.addEventListener('click', endSimulation);
-  btnBilanClose.addEventListener('click', closeBilan);
-  btnNewSim.addEventListener('click', resetSimulation);
-  btnPersona.addEventListener('click', openModal);
-  btnSheetClose.addEventListener('click', closeModal);
-  modalOverlay.addEventListener('click', e => { if (e.target === modalOverlay) closeModal(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+function showScreen(id) {
+  ['login-screen', 'config-screen', 'generating-screen', 'briefing-screen', 'app-screen']
+    .forEach(s => {
+      const el = $(s);
+      if (el) el.classList.toggle('hidden', s !== id);
+    });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 //  AUTH
 // ════════════════════════════════════════════════════════════════════════════
 
-function togglePasswordVisibility(input, btn) {
-  const isHidden = input.type === 'password';
-  input.type = isHidden ? 'text' : 'password';
-  btn.innerHTML = isHidden
-    ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" x2="23" y1="1" y2="23"/></svg>`
-    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
-}
-
-function showSignupPanel() {
-  signupPanel.classList.remove('hidden');
-  loginForm.classList.add('hidden');
-  loginError.textContent = '';
-}
-
-function showLoginPanel() {
-  signupPanel.classList.add('hidden');
-  loginForm.classList.remove('hidden');
-  signupError.textContent = '';
-  signupSuccess.textContent = '';
-}
-
-async function handleLogin(e) {
-  e.preventDefault();
-  loginError.textContent = '';
-  loginBtn.disabled = true;
-  loginBtn.textContent = 'Connexion...';
-
-  try {
-    const res = await fetch('/api/auth/login', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ email: loginEmail.value.trim(), password: loginPassword.value })
+// Toggle password visibility
+function initPasswordToggles() {
+  [['toggle-eye-login', 'login-password'], ['toggle-eye-signup', 'signup-password']].forEach(([btnId, inputId]) => {
+    const btn   = $(btnId);
+    const input = $(inputId);
+    if (!btn || !input) return;
+    btn.addEventListener('click', () => {
+      const isText = input.type === 'text';
+      input.type = isText ? 'password' : 'text';
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Erreur de connexion');
-    currentUser    = data.user;
-    currentProfile = data.profile;
-    showApp();
-  } catch (err) {
-    loginError.textContent = err.message;
-  } finally {
-    loginBtn.disabled = false;
-    loginBtn.textContent = 'Se connecter';
-  }
-}
-
-async function handleSignup() {
-  signupError.textContent   = '';
-  signupSuccess.textContent = '';
-  signupBtn.disabled = true;
-  signupBtn.textContent = 'Création...';
-
-  try {
-    const res = await fetch('/api/auth/signup', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        email   : signupEmail.value.trim(),
-        password: signupPassword.value,
-        nom     : signupNom.value.trim(),
-        prenom  : signupPrenom.value.trim()
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    signupSuccess.textContent = '✅ Compte créé ! Vérifiez votre email puis connectez-vous.';
-    setTimeout(showLoginPanel, 3000);
-  } catch (err) {
-    signupError.textContent = err.message;
-  } finally {
-    signupBtn.disabled = false;
-    signupBtn.textContent = 'Créer mon compte';
-  }
-}
-
-async function handleForgotPassword() {
-  const email = loginEmail.value.trim();
-  if (!email) {
-    loginError.textContent = 'Entrez votre email ci-dessus puis cliquez sur ce lien.';
-    return;
-  }
-  loginError.textContent = '';
-  try {
-    const res = await fetch('/api/auth/reset-password', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ email })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    loginError.style.color = 'var(--success)';
-    loginError.textContent = '✅ Email de réinitialisation envoyé.';
-    setTimeout(() => {
-      loginError.style.color = '';
-      loginError.textContent = '';
-    }, 4000);
-  } catch (err) {
-    loginError.textContent = err.message;
-  }
-}
-
-function showApp() {
-  loginScreen.classList.add('hidden');
-  appScreen.classList.remove('hidden');
-  const prenom = currentProfile?.prenom || currentUser?.email?.split('@')[0] || 'Utilisateur';
-  userNameEl.textContent = prenom;
-  renderPersonaGrid();
-  setState(State.IDLE);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  SIMULATION
-// ════════════════════════════════════════════════════════════════════════════
-
-async function startSimulation() {
-  if (!currentUser) return;
-  try {
-    const res = await fetch('/api/simulation/start', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        userId          : currentUser.id,
-        typeScenario    : currentPersonaId,
-        niveauDifficulte: 'moyen',
-        modeJeu         : 'entrainement'
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    currentSimulationId = data.simulationId;
-    simulationStartTime = Date.now();
-    fullTranscription   = [];
-    btnEnd.classList.remove('hidden');
-    console.log(`[Simulation] ▶ Démarrée : ${currentSimulationId}`);
-  } catch (err) {
-    console.error('[Simulation] Erreur démarrage :', err.message);
-  }
-}
-
-async function endSimulation() {
-  if (!currentSimulationId) return;
-  const dureeSecondes = Math.floor((Date.now() - simulationStartTime) / 1000);
-  const simId = currentSimulationId;
-  currentSimulationId = null;
-  btnEnd.classList.add('hidden');
-  btnMic.disabled = true;
-  statusLabel.textContent = 'Génération du bilan...';
-
-  try {
-    // Clôturer en arrière-plan (non bloquant)
-    fetch('/api/simulation/end', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ simulationId: simId, dureeSecondes, transcription: fullTranscription })
-    });
-
-    // Bilan
-    const bilanRes = await fetch('/api/bilan', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ simulationId: simId, transcription: fullTranscription })
-    });
-    const bilan = await bilanRes.json();
-    if (!bilanRes.ok) throw new Error(bilan.error);
-    showBilan(bilan);
-  } catch (err) {
-    console.error('[Simulation] Erreur fin :', err.message);
-    setState(State.IDLE);
-    btnMic.disabled = false;
-  }
-}
-
-function showBilan(bilan) {
-  bilanNote.textContent     = `${bilan.note_globale}/10`;
-  bilanPositifs.textContent = bilan.points_positifs;
-  bilanNegatifs.textContent = bilan.points_negatifs;
-  bilanConseils.textContent = bilan.conseils;
-  const note = bilan.note_globale;
-  bilanNote.style.color = note >= 7 ? '#22C55E' : note >= 5 ? '#F59E0B' : '#EF4444';
-  bilanModal.classList.remove('hidden');
-  setState(State.IDLE);
-  btnMic.disabled = false;
-}
-
-function closeBilan() { bilanModal.classList.add('hidden'); }
-
-function resetSimulation() {
-  closeBilan();
-  conversationHistory = [];
-  fullTranscription   = [];
-  conversation.innerHTML = '';
-  if (convEmpty) { conversation.appendChild(convEmpty); convEmpty.style.display = ''; }
-  setState(State.IDLE);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  MACHINE D'ÉTAT
-// ════════════════════════════════════════════════════════════════════════════
-
-function setState(newState) {
-  currentState = newState;
-  orbContainer.dataset.state = newState;
-
-  const STATUS = {
-    [State.IDLE]     : 'Prêt à écouter',
-    [State.LISTENING]: 'En écoute...',
-    [State.THINKING] : 'Je réfléchis...',
-    [State.SPEAKING] : 'Je vous réponds...',
-    [State.ERROR]    : 'Une erreur est survenue'
-  };
-  const BTN_LABELS = {
-    [State.IDLE]     : 'Parler',
-    [State.LISTENING]: 'Arrêter',
-    [State.THINKING] : 'Patientez...',
-    [State.SPEAKING] : 'Patientez...',
-    [State.ERROR]    : 'Réessayer'
-  };
-
-  statusLabel.textContent = STATUS[newState] || '';
-  btnMicLabel.textContent = BTN_LABELS[newState] || '';
-
-  [iconMic, iconWave, iconLoader, iconSound, iconError].forEach(el => el.classList.add('hidden'));
-  ({ [State.IDLE]: iconMic, [State.LISTENING]: iconWave, [State.THINKING]: iconLoader, [State.SPEAKING]: iconSound, [State.ERROR]: iconError })[newState]?.classList.remove('hidden');
-
-  btnMic.disabled = (newState === State.THINKING || newState === State.SPEAKING);
-
-  if (newState === State.LISTENING) {
-    btnMic.classList.add('listening');
-    micIconDefault.classList.add('hidden');
-    micIconStop.classList.remove('hidden');
-    btnMic.setAttribute('aria-label', "Arrêter l'écoute");
-  } else {
-    btnMic.classList.remove('listening');
-    micIconDefault.classList.remove('hidden');
-    micIconStop.classList.add('hidden');
-    btnMic.setAttribute('aria-label', 'Commencer à parler');
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  PIPELINE VOCAL — Son non bloquant (TTS parallèle au stockage)
-// ════════════════════════════════════════════════════════════════════════════
-
-async function handleMicClick() {
-  if (!currentSimulationId && (currentState === State.IDLE || currentState === State.ERROR)) {
-    await startSimulation();
-  }
-  if (currentState === State.IDLE || currentState === State.ERROR) {
-    await startListening();
-  } else if (currentState === State.LISTENING) {
-    await stopListening();
-  }
-}
-
-async function startListening() {
-  try {
-    if (!navigator.mediaDevices?.getUserMedia) { alert("Navigateur non supporté."); return; }
-
-    const tokenRes = await fetch('/api/deepgram-token');
-    if (!tokenRes.ok) throw new Error('Token Deepgram indisponible');
-    const { token } = await tokenRes.json();
-
-    audioStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 }
-    });
-
-    const params = new URLSearchParams({
-      model: 'nova-3', language: 'fr', smart_format: 'true',
-      interim_results: 'true', punctuate: 'true',
-      endpointing: '1200', utterance_end_ms: '1500'
-    });
-
-    deepgramSocket = new WebSocket(`wss://api.deepgram.com/v1/listen?${params}`, ['token', token]);
-
-    deepgramSocket.addEventListener('open', () => {
-      setState(State.LISTENING);
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-      mediaRecorder = new MediaRecorder(audioStream, { mimeType });
-      mediaRecorder.addEventListener('dataavailable', ({ data }) => {
-        if (data.size > 0 && deepgramSocket?.readyState === WebSocket.OPEN) deepgramSocket.send(data);
-      });
-      mediaRecorder.start(250);
-      keepAliveTimer = setInterval(() => {
-        if (deepgramSocket?.readyState === WebSocket.OPEN) deepgramSocket.send(JSON.stringify({ type: 'KeepAlive' }));
-      }, 5000);
-    });
-
-    deepgramSocket.addEventListener('message', async (event) => {
-      if (currentState !== State.LISTENING) return;
-      let data;
-      try { data = JSON.parse(event.data); } catch { return; }
-      if (data.type !== 'Results') return;
-      const transcript = data.channel?.alternatives?.[0]?.transcript || '';
-      if (!transcript.trim()) return;
-      if (!data.is_final) {
-        showTranscript(transcript, 'interim');
-      } else {
-        showTranscript(transcript, 'final');
-        if (data.speech_final && !isProcessing) await processUtterance(transcript.trim());
-      }
-    });
-
-    deepgramSocket.addEventListener('error', () => { cleanupAudio(); setState(State.ERROR); setTimeout(() => setState(State.IDLE), 3000); });
-    deepgramSocket.addEventListener('close', e => console.log('[DG] Fermé :', e.code));
-  } catch (err) {
-    if (err.name === 'NotAllowedError') alert('Accès au microphone refusé.');
-    cleanupAudio();
-    setState(State.ERROR);
-    setTimeout(() => setState(State.IDLE), 3000);
-  }
-}
-
-async function stopListening() {
-  if (currentState !== State.LISTENING) return;
-  const pendingText = transcriptLive.textContent.trim();
-  cleanupAudio();
-  if (pendingText && !isProcessing) await processUtterance(pendingText);
-  else if (!isProcessing) { hideTranscript(); setState(State.IDLE); }
-}
-
-async function processUtterance(userText) {
-  if (isProcessing || !userText) return;
-  isProcessing = true;
-  cleanupAudio();
-  addMessage('user', userText);
-  hideTranscript();
-
-  const elapsed = simulationStartTime ? Math.floor((Date.now() - simulationStartTime) / 1000) : 0;
-  fullTranscription.push({ locuteur: 'commercial', texte: userText, horodatageSecondes: elapsed });
-  conversationHistory.push({ role: 'user', content: userText });
-
-  setState(State.THINKING);
-
-  try {
-    const persona = getPersona(currentPersonaId);
-
-    // ── LLM ─────────────────────────────────────────────────────────────────
-    const chatRes = await fetch('/api/chat', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ messages: conversationHistory, systemPrompt: persona.systemPrompt })
-    });
-    if (!chatRes.ok) throw new Error(`Chat API ${chatRes.status}`);
-    const { text: aiText } = await chatRes.json();
-
-    addMessage('ai', aiText);
-    conversationHistory.push({ role: 'assistant', content: aiText });
-
-    const elapsedAi = simulationStartTime ? Math.floor((Date.now() - simulationStartTime) / 1000) : 0;
-    fullTranscription.push({ locuteur: 'ia', texte: aiText, horodatageSecondes: elapsedAi });
-
-    // ── TTS — immédiat, sans attendre autre chose ────────────────────────────
-    setState(State.SPEAKING);
-    await playTTS(aiText);
-    setState(State.IDLE);
-
-  } catch (err) {
-    console.error('[Pipeline] Erreur :', err.message);
-    addMessage('ai', 'Désolé, une erreur est survenue. Veuillez réessayer.');
-    setState(State.ERROR);
-    setTimeout(() => setState(State.IDLE), 2500);
-  } finally {
-    isProcessing = false;
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  TTS + AUDIO
-// ════════════════════════════════════════════════════════════════════════════
-
-async function playTTS(text) {
-  const ttsRes = await fetch('/api/tts', {
-    method : 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body   : JSON.stringify({ text })
   });
-  if (!ttsRes.ok) throw new Error(`Cartesia ${ttsRes.status}`);
-
-  const arrayBuffer = await ttsRes.arrayBuffer();
-
-  if (!audioCtx || audioCtx.state === 'closed') audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-  analyserNode = audioCtx.createAnalyser();
-  analyserNode.fftSize = 256;
-  analyserNode.smoothingTimeConstant = 0.75;
-
-  const decodedData = await audioCtx.decodeAudioData(arrayBuffer);
-  const source = audioCtx.createBufferSource();
-  source.buffer = decodedData;
-  source.connect(analyserNode);
-  analyserNode.connect(audioCtx.destination);
-
-  startVisualizer();
-  source.start(0);
-
-  return new Promise(resolve => { source.onended = () => { stopVisualizer(); resolve(); }; });
 }
 
-function startVisualizer() {
-  if (!analyserNode) return;
-  audioViz.style.opacity = '1';
-  const ctx = audioViz.getContext('2d');
-  const bufLen = analyserNode.frequencyBinCount;
-  const data = new Uint8Array(bufLen);
-  const BARS = 28, stride = Math.floor(bufLen / BARS);
-  const W = audioViz.width, H = audioViz.height, gap = 3, barW = (W - gap * (BARS - 1)) / BARS;
+function initAuth() {
+  initPasswordToggles();
+
+  // Login ↔ signup
+  $('btn-show-signup').addEventListener('click', () => {
+    hide($('login-form'));
+    show($('signup-panel'));
+  });
+  $('btn-show-login').addEventListener('click', () => {
+    hide($('signup-panel'));
+    show($('login-form'));
+  });
+
+  // Login
+  $('login-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn   = $('login-btn');
+    const email = $('login-email').value.trim();
+    const pass  = $('login-password').value;
+    $('login-error').textContent = '';
+    btn.disabled = true;
+    btn.textContent = 'Connexion…';
+
+    try {
+      const res  = await fetch('/api/auth/login', {
+        method : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body   : JSON.stringify({ email, password: pass })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erreur de connexion');
+
+      STATE.user = data.user;
+      const prenom = data.profile?.prenom || data.user.user_metadata?.prenom || email.split('@')[0];
+      $('config-user-name').textContent = prenom;
+      showScreen('config-screen');
+    } catch (err) {
+      $('login-error').textContent = err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Se connecter';
+    }
+  });
+
+  // Signup
+  $('signup-btn').addEventListener('click', async () => {
+    const btn = $('signup-btn');
+    $('signup-error').textContent = '';
+    $('signup-success').textContent = '';
+    btn.disabled = true;
+    btn.textContent = 'Création…';
+
+    try {
+      const res  = await fetch('/api/auth/signup', {
+        method : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body   : JSON.stringify({
+          email   : $('signup-email').value.trim(),
+          password: $('signup-password').value,
+          prenom  : $('signup-prenom').value.trim(),
+          nom     : $('signup-nom').value.trim()
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erreur');
+      $('signup-success').textContent = data.message;
+    } catch (err) {
+      $('signup-error').textContent = err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Créer mon compte';
+    }
+  });
+
+  // Mot de passe oublié
+  $('btn-forgot').addEventListener('click', async () => {
+    const email = $('login-email').value.trim();
+    if (!email) { $('login-error').textContent = 'Entrez votre email d\'abord.'; return; }
+    try {
+      await fetch('/api/auth/reset-password', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      $('login-error').style.color = 'var(--success)';
+      $('login-error').textContent = 'Email de réinitialisation envoyé.';
+    } catch (err) {
+      $('login-error').textContent = err.message;
+    }
+  });
+
+  // Logout
+  ['btn-logout'].forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('click', () => {
+      STATE.user = null;
+      showScreen('login-screen');
+    });
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CONFIGURATION MULTI-STEP
+// ════════════════════════════════════════════════════════════════════════════
+
+let currentStep = 1;
+const TOTAL_STEPS = 4;
+
+function updateProgress() {
+  const pct = ((currentStep - 1) / (TOTAL_STEPS - 1)) * 100;
+  $('config-progress-bar').style.width = `${pct}%`;
+}
+
+function showStep(n) {
+  document.querySelectorAll('.config-step').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.step) === n);
+  });
+
+  const backBtn = $('btn-config-back');
+  const nextBtn = $('btn-config-next');
+
+  if (n === 1) hide(backBtn); else show(backBtn);
+
+  if (n === TOTAL_STEPS) {
+    nextBtn.innerHTML = `
+      Générer le prospect
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
+  } else {
+    nextBtn.innerHTML = `Suivant <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>`;
+  }
+
+  updateProgress();
+  currentStep = n;
+  updateConditionalSections();
+}
+
+function updateConditionalSections() {
+  const { mode, type } = STATE.currentConfig;
+
+  // Sous-mode RDV
+  const rdvSection = $('rdv-submode-section');
+  if (mode === 'rdv') show(rdvSection); else hide(rdvSection);
+
+  // Canal cold call B2B
+  const canalSection = $('canal-section');
+  if (type === 'b2b' && mode === 'cold_call') show(canalSection); else hide(canalSection);
+
+  // Champs B2B / B2C sur step 3
+  const b2bFields = $('b2b-fields');
+  const b2cFields = $('b2c-fields');
+  if (b2bFields && b2cFields) {
+    if (type === 'b2b') { show(b2bFields); hide(b2cFields); }
+    else                { hide(b2bFields); show(b2cFields); }
+  }
+}
+
+function validateStep(n) {
+  if (n === 3) {
+    const err = $('step3-error');
+    err.textContent = '';
+    if (STATE.currentConfig.type === 'b2b') {
+      if (!$('input-secteur').value.trim()) { err.textContent = 'Le secteur est requis.'; return false; }
+      if (!$('input-poste').value.trim())   { err.textContent = 'Le poste est requis.'; return false; }
+    } else {
+      if (!$('input-profil-b2c').value.trim()) { err.textContent = 'Décris le profil du particulier.'; return false; }
+    }
+  }
+  if (n === 4) {
+    const err = $('step4-error');
+    err.textContent = '';
+    if (!$('input-produit').value.trim()) { err.textContent = 'Décris ce que tu vends.'; return false; }
+  }
+  return true;
+}
+
+function collectStep3Values() {
+  if (STATE.currentConfig.type === 'b2b') {
+    STATE.currentConfig.secteur = $('input-secteur').value.trim();
+    STATE.currentConfig.poste   = $('input-poste').value.trim();
+    STATE.currentConfig.taille  = $('select-taille').value;
+  } else {
+    STATE.currentConfig.secteur = '';
+    STATE.currentConfig.poste   = $('input-profil-b2c').value.trim();
+    STATE.currentConfig.taille  = 'particulier';
+  }
+}
+
+function collectStep4Values() {
+  STATE.currentConfig.produit = $('input-produit').value.trim();
+}
+
+function initConfig() {
+  // Option tiles — sélection
+  document.querySelectorAll('.option-tile[data-group]').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const group = tile.dataset.group;
+      const value = tile.dataset.value;
+
+      document.querySelectorAll(`.option-tile[data-group="${group}"]`).forEach(t => {
+        t.classList.remove('active');
+        const check = t.querySelector('.tile-check');
+        if (check) hide(check);
+      });
+      tile.classList.add('active');
+      const check = tile.querySelector('.tile-check');
+      if (check) show(check);
+
+      STATE.currentConfig[group] = value;
+      updateConditionalSections();
+    });
+  });
+
+  // Navigation
+  $('btn-config-next').addEventListener('click', async () => {
+    if (!validateStep(currentStep)) return;
+    if (currentStep === 3) collectStep3Values();
+    if (currentStep === 4) {
+      collectStep4Values();
+      await generatePersona();
+      return;
+    }
+    showStep(currentStep + 1);
+  });
+
+  $('btn-config-back').addEventListener('click', () => {
+    if (currentStep > 1) showStep(currentStep - 1);
+  });
+
+  updateProgress();
+  updateConditionalSections();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  GÉNÉRATION DE PERSONA — LLM N°1
+// ════════════════════════════════════════════════════════════════════════════
+
+const GENERATING_MESSAGES = [
+  'Analyse des paramètres…',
+  'Construction du profil…',
+  'Génération du persona…',
+  'Calibrage du comportement…',
+  'Préparation de la simulation…',
+];
+
+async function generatePersona() {
+  showScreen('generating-screen');
+
+  // Animation des messages de chargement
+  let msgIdx = 0;
+  const subEl = $('generating-sub');
+  subEl.textContent = GENERATING_MESSAGES[0];
+  const msgInterval = setInterval(() => {
+    msgIdx = (msgIdx + 1) % GENERATING_MESSAGES.length;
+    subEl.textContent = GENERATING_MESSAGES[msgIdx];
+  }, 1200);
+
+  try {
+    const res  = await fetch('/api/generate-persona', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({ config: STATE.currentConfig })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erreur de génération');
+
+    STATE.currentPersona = data.persona;
+    clearInterval(msgInterval);
+    showBriefing();
+  } catch (err) {
+    clearInterval(msgInterval);
+    alert('Erreur lors de la génération du persona : ' + err.message);
+    showScreen('config-screen');
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ÉCRAN DE BRIEFING
+// ════════════════════════════════════════════════════════════════════════════
+
+function showBriefing() {
+  const p = STATE.currentPersona;
+  const c = STATE.currentConfig;
+
+  // Badge
+  const modeLabel  = c.mode === 'cold_call' ? 'Cold Call' : 'RDV';
+  const typeLabel  = c.type === 'b2b' ? 'B2B' : 'B2C';
+  const diffLabel  = { facile: 'Facile', moyen: 'Moyen', difficile: 'Difficile' }[c.difficulty];
+  $('briefing-badge').textContent = `${modeLabel} · ${typeLabel} · ${diffLabel}`;
+
+  // Identité
+  $('briefing-avatar').textContent = p.prenom.charAt(0).toUpperCase();
+  $('briefing-name').textContent   = `${p.prenom}, ${p.age} ans`;
+  $('briefing-poste').textContent  = p.poste_exact;
+  $('briefing-structure').textContent = `${p.structure} · ${p.ville}`;
+
+  // Détails
+  $('briefing-journee').textContent = p.journee_moment;
+  $('briefing-rapport').textContent = p.rapport_produit;
+
+  // Contraintes
+  const list = $('briefing-contraintes');
+  list.innerHTML = '';
+  [p.contrainte_1, p.contrainte_2, p.contrainte_3].filter(Boolean).forEach(c => {
+    const li = document.createElement('li');
+    li.className = 'briefing-list-item';
+    li.textContent = c;
+    list.appendChild(li);
+  });
+
+  showScreen('briefing-screen');
+}
+
+function initBriefing() {
+  $('btn-briefing-back').addEventListener('click', () => {
+    showScreen('config-screen');
+    showStep(1);
+  });
+
+  $('btn-start-session').addEventListener('click', startSession);
+
+  $('btn-regenerate').addEventListener('click', async () => {
+    await generatePersona();
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SESSION VOCALE
+// ════════════════════════════════════════════════════════════════════════════
+
+function startSession() {
+  const p = STATE.currentPersona;
+  const c = STATE.currentConfig;
+
+  // Reset état conversation
+  STATE.conversationHistory = [];
+  STATE.fullTranscription   = [];
+  STATE.simulationId        = null;
+
+  // Topbar session
+  $('session-prospect-name').textContent = `${p.prenom} · ${p.poste_exact}`;
+  const modeLabel = c.mode === 'cold_call' ? 'Cold Call' : 'RDV';
+  $('session-badge-tag').textContent = `${modeLabel} · ${c.difficulty}`;
+
+  // Conv empty
+  $('conv-empty-sub').textContent = c.mode === 'cold_call'
+    ? `Tu appelles ${p.prenom}. Parle pour commencer.`
+    : `Ton RDV avec ${p.prenom} commence. Parle pour ouvrir.`;
+
+  showScreen('app-screen');
+
+  // Lancer la simulation Supabase en arrière-plan
+  if (STATE.user) {
+    fetch('/api/simulation/start', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({
+        userId    : STATE.user.id,
+        config    : STATE.currentConfig,
+        personaData: STATE.currentPersona
+      })
+    })
+    .then(r => r.json())
+    .then(d => { if (d.simulationId) STATE.simulationId = d.simulationId; })
+    .catch(() => {}); // non-bloquant
+  }
+
+  startTimer();
+  resetOrbState();
+}
+
+// ─── Timer ───────────────────────────────────────────────────────────────────
+function startTimer() {
+  STATE.sessionStartTime = Date.now();
+  clearInterval(STATE.timerInterval);
+  STATE.timerInterval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - STATE.sessionStartTime) / 1000);
+    const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const s = String(elapsed % 60).padStart(2, '0');
+    $('session-timer').textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function stopTimer() {
+  clearInterval(STATE.timerInterval);
+  return STATE.sessionStartTime ? Math.floor((Date.now() - STATE.sessionStartTime) / 1000) : 0;
+}
+
+// ─── États de l'orb ──────────────────────────────────────────────────────────
+function resetOrbState() { setOrbState('idle'); }
+
+function setOrbState(state) {
+  const orb   = $('orb-container');
+  const wrap  = $('orb-icon-wrap');
+  const label = $('status-label');
+
+  orb.dataset.state = state;
+
+  const icons = { mic: $('icon-mic'), wave: $('icon-wave'), loader: $('icon-loader'), sound: $('icon-sound'), error: $('icon-error') };
+  Object.values(icons).forEach(el => { if (el) el.classList.add('hidden'); });
+
+  const btnMic   = $('btn-mic');
+  const discMic  = $('btn-mic-disc');
+  const lblMic   = $('btn-mic-label');
+  const iconDef  = $('mic-icon-default');
+  const iconStop = $('mic-icon-stop');
+  const btnEnd   = $('btn-end');
+  const vizCanvas = $('audio-viz');
+
+  switch (state) {
+    case 'idle':
+      icons.mic && show(icons.mic);
+      label.textContent = 'Prêt à écouter';
+      btnMic.disabled = false;
+      btnMic.classList.remove('listening');
+      iconDef && show(iconDef);
+      iconStop && hide(iconStop);
+      lblMic.textContent = 'Parler';
+      vizCanvas.style.opacity = '0';
+      break;
+    case 'listening':
+      icons.wave && show(icons.wave);
+      label.textContent = 'En écoute…';
+      btnMic.classList.add('listening');
+      iconDef && hide(iconDef);
+      iconStop && show(iconStop);
+      lblMic.textContent = 'Envoyer';
+      btnEnd && show(btnEnd);
+      vizCanvas.style.opacity = '1';
+      break;
+    case 'thinking':
+      icons.loader && show(icons.loader);
+      label.textContent = 'Le prospect réfléchit…';
+      btnMic.disabled = true;
+      btnMic.classList.remove('listening');
+      iconDef && show(iconDef);
+      iconStop && hide(iconStop);
+      lblMic.textContent = 'Parler';
+      vizCanvas.style.opacity = '0';
+      break;
+    case 'speaking':
+      icons.sound && show(icons.sound);
+      label.textContent = 'Le prospect parle…';
+      btnMic.disabled = true;
+      vizCanvas.style.opacity = '1';
+      break;
+    case 'error':
+      icons.error && show(icons.error);
+      label.textContent = 'Erreur — réessaie';
+      btnMic.disabled = false;
+      btnMic.classList.remove('listening');
+      iconDef && show(iconDef);
+      iconStop && hide(iconStop);
+      lblMic.textContent = 'Parler';
+      vizCanvas.style.opacity = '0';
+      break;
+  }
+}
+
+// ─── Affichage conversation ───────────────────────────────────────────────────
+function addMessage(role, text) {
+  const conv  = $('conversation');
+  const empty = $('conv-empty');
+  if (empty) hide(empty);
+
+  const wrap = document.createElement('div');
+  wrap.className = `message ${role === 'user' ? 'user' : 'ai'}`;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.innerHTML = role === 'user'
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.43a2 2 0 0 1 1.99-2.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.13 6.13l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.textContent = text;
+
+  wrap.appendChild(avatar);
+  wrap.appendChild(bubble);
+  conv.appendChild(wrap);
+  conv.scrollTop = conv.scrollHeight;
+}
+
+// ─── Transcript live ─────────────────────────────────────────────────────────
+function showTranscript(text, isFinal) {
+  const el = $('transcript-live');
+  el.textContent = text;
+  el.classList.add('visible');
+  el.classList.toggle('interim', !isFinal);
+  el.classList.toggle('final', isFinal);
+}
+
+function clearTranscript() {
+  const el = $('transcript-live');
+  el.textContent = '';
+  el.classList.remove('visible', 'interim', 'final');
+}
+
+// ─── Visualiseur audio ────────────────────────────────────────────────────────
+function startViz(stream) {
+  if (!STATE.audioCtx) STATE.audioCtx = new AudioContext();
+  STATE.analyser = STATE.audioCtx.createAnalyser();
+  STATE.analyser.fftSize = 64;
+  const src = STATE.audioCtx.createMediaStreamSource(stream);
+  src.connect(STATE.analyser);
+
+  const canvas = $('audio-viz');
+  const ctx    = canvas.getContext('2d');
+  const buf    = new Uint8Array(STATE.analyser.frequencyBinCount);
 
   function draw() {
-    vizFrame = requestAnimationFrame(draw);
-    analyserNode.getByteFrequencyData(data);
-    ctx.clearRect(0, 0, W, H);
-    for (let i = 0; i < BARS; i++) {
-      const val = data[i * stride] / 255;
-      const barH = Math.max(4, val * H * 0.88);
-      const x = i * (barW + gap), y = (H - barH) / 2;
-      const grad = ctx.createLinearGradient(x, y, x, y + barH);
-      grad.addColorStop(0, `rgba(108, 99, 255, ${0.4 + val * 0.6})`);
-      grad.addColorStop(1, `rgba(16, 185, 129, ${0.4 + val * 0.6})`);
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(x, y, barW, barH, 2);
-      else ctx.rect(x, y, barW, barH);
-      ctx.fill();
-    }
+    STATE.vizRaf = requestAnimationFrame(draw);
+    STATE.analyser.getByteFrequencyData(buf);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const barW = (canvas.width / buf.length) * 2;
+    buf.forEach((v, i) => {
+      const h  = (v / 255) * canvas.height;
+      const hue = 240 + i * 2;
+      ctx.fillStyle = `hsla(${hue}, 70%, 60%, 0.8)`;
+      ctx.fillRect(i * (barW + 1), canvas.height - h, barW, h);
+    });
   }
   draw();
 }
 
-function stopVisualizer() {
-  cancelAnimationFrame(vizFrame);
-  vizFrame = null;
-  audioViz.style.opacity = '0';
-  audioViz.getContext('2d').clearRect(0, 0, audioViz.width, audioViz.height);
+function stopViz() {
+  if (STATE.vizRaf) { cancelAnimationFrame(STATE.vizRaf); STATE.vizRaf = null; }
+  const canvas = $('audio-viz');
+  const ctx    = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
-function cleanupAudio() {
-  clearInterval(keepAliveTimer); keepAliveTimer = null;
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch (_) {} }
-  mediaRecorder = null;
-  if (deepgramSocket) {
-    try { if (deepgramSocket.readyState === WebSocket.OPEN) deepgramSocket.send(JSON.stringify({ type: 'CloseStream' })); deepgramSocket.close(); } catch (_) {}
-    deepgramSocket = null;
+// ─── Deepgram STT ─────────────────────────────────────────────────────────────
+async function startListening() {
+  setOrbState('listening');
+  clearTranscript();
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    setOrbState('error');
+    $('status-label').textContent = 'Micro non accessible';
+    return;
   }
-  if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
+
+  startViz(stream);
+
+  // Récupérer le token Deepgram
+  const tokenRes = await fetch('/api/deepgram-token');
+  const { token } = await tokenRes.json();
+
+  STATE.deepgramSocket = new WebSocket(
+    `wss://api.deepgram.com/v1/listen?language=fr&model=nova-3&punctuate=true&interim_results=true&endpointing=500`,
+    ['token', token]
+  );
+
+  STATE.deepgramSocket.onopen = () => {
+    STATE.mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+    STATE.mediaRecorder.ondataavailable = e => {
+      if (STATE.deepgramSocket.readyState === WebSocket.OPEN) {
+        STATE.deepgramSocket.send(e.data);
+      }
+    };
+    STATE.mediaRecorder.start(250);
+  };
+
+  let finalTranscript = '';
+
+  STATE.deepgramSocket.onmessage = async e => {
+    const msg = JSON.parse(e.data);
+    const alt = msg.channel?.alternatives?.[0];
+    if (!alt) return;
+
+    const text    = alt.transcript.trim();
+    const isFinal = msg.speech_final;
+
+    if (!text) return;
+
+    if (isFinal) {
+      finalTranscript += (finalTranscript ? ' ' : '') + text;
+      showTranscript(finalTranscript, true);
+    } else {
+      showTranscript(finalTranscript + (finalTranscript ? ' ' : '') + text, false);
+    }
+  };
+
+  STATE.deepgramSocket.onerror = () => setOrbState('error');
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  UI HELPERS
-// ════════════════════════════════════════════════════════════════════════════
-
-function showTranscript(text, mode) {
-  transcriptLive.textContent = text;
-  transcriptLive.className   = `transcript-live visible ${mode}`;
+function stopListening() {
+  if (STATE.mediaRecorder && STATE.mediaRecorder.state !== 'inactive') {
+    STATE.mediaRecorder.stop();
+    STATE.mediaRecorder.stream.getTracks().forEach(t => t.stop());
+  }
+  if (STATE.deepgramSocket) {
+    STATE.deepgramSocket.close();
+    STATE.deepgramSocket = null;
+  }
+  stopViz();
 }
 
-function hideTranscript() {
-  transcriptLive.textContent = '';
-  transcriptLive.className   = 'transcript-live';
+// ─── Pipeline LLM → TTS ──────────────────────────────────────────────────────
+async function processUtterance(text) {
+  if (!text.trim()) { setOrbState('idle'); return; }
+
+  clearTranscript();
+  addMessage('user', text);
+  STATE.conversationHistory.push({ role: 'user', content: text });
+  STATE.fullTranscription.push({
+    locuteur: 'commercial', texte: text,
+    horodatageSecondes: STATE.sessionStartTime ? Math.floor((Date.now() - STATE.sessionStartTime) / 1000) : 0
+  });
+
+  setOrbState('thinking');
+
+  try {
+    const chatRes = await fetch('/api/chat', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({
+        messages: STATE.conversationHistory,
+        persona : STATE.currentPersona,
+        config  : STATE.currentConfig
+      })
+    });
+
+    if (!chatRes.ok) throw new Error(`LLM error ${chatRes.status}`);
+    const { text: aiText } = await chatRes.json();
+
+    if (!aiText) throw new Error('Réponse vide du LLM');
+
+    addMessage('ai', aiText);
+    STATE.conversationHistory.push({ role: 'assistant', content: aiText });
+    STATE.fullTranscription.push({
+      locuteur: 'prospect', texte: aiText,
+      horodatageSecondes: STATE.sessionStartTime ? Math.floor((Date.now() - STATE.sessionStartTime) / 1000) : 0
+    });
+
+    await playTTS(aiText);
+  } catch (err) {
+    console.error('[processUtterance]', err);
+    setOrbState('error');
+    $('status-label').textContent = 'Erreur — réessaie';
+  }
 }
 
-function addMessage(role, text) {
-  if (convEmpty) convEmpty.style.display = 'none';
-  const isUser = role === 'user';
-  const userSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
-  const aiSvg   = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="10" x="3" y="11" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" x2="8" y1="16" y2="16"/><line x1="16" x2="16" y1="16" y2="16"/></svg>`;
-  const el = document.createElement('div');
-  el.className = `message ${role}`;
-  el.innerHTML = `<div class="msg-avatar" aria-hidden="true">${isUser ? userSvg : aiSvg}</div><div class="msg-bubble">${escapeHtml(text)}</div>`;
-  conversation.appendChild(el);
-  requestAnimationFrame(() => conversation.scrollTo({ top: conversation.scrollHeight, behavior: 'smooth' }));
+async function playTTS(text) {
+  setOrbState('speaking');
+
+  try {
+    const ttsRes = await fetch('/api/tts', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({ text })
+    });
+
+    if (!ttsRes.ok) throw new Error(`TTS error ${ttsRes.status}`);
+
+    const buffer = await ttsRes.arrayBuffer();
+
+    if (!STATE.audioCtx) STATE.audioCtx = new AudioContext();
+    const decoded = await STATE.audioCtx.decodeAudioData(buffer);
+
+    // Analyser pour visualisation TTS
+    const analyser = STATE.audioCtx.createAnalyser();
+    analyser.fftSize = 64;
+    const canvas = $('audio-viz');
+    const ctx    = canvas.getContext('2d');
+    const buf    = new Uint8Array(analyser.frequencyBinCount);
+    canvas.style.opacity = '1';
+
+    function drawTTS() {
+      STATE.vizRaf = requestAnimationFrame(drawTTS);
+      analyser.getByteFrequencyData(buf);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const barW = (canvas.width / buf.length) * 2;
+      buf.forEach((v, i) => {
+        const h = (v / 255) * canvas.height;
+        ctx.fillStyle = `hsla(150, 65%, 55%, 0.8)`;
+        ctx.fillRect(i * (barW + 1), canvas.height - h, barW, h);
+      });
+    }
+    drawTTS();
+
+    STATE.ttsSource = STATE.audioCtx.createBufferSource();
+    STATE.ttsSource.buffer = decoded;
+    STATE.ttsSource.connect(analyser);
+    analyser.connect(STATE.audioCtx.destination);
+    STATE.ttsSource.start();
+
+    STATE.ttsSource.onended = () => {
+      stopViz();
+      canvas.style.opacity = '0';
+      setOrbState('idle');
+    };
+  } catch (err) {
+    console.error('[playTTS]', err);
+    setOrbState('error');
+  }
 }
 
-function escapeHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;').replace(/\n/g,'<br>');
-}
+// ─── Bouton micro ─────────────────────────────────────────────────────────────
+function initMicButton() {
+  const btnMic = $('btn-mic');
+  let isListening = false;
+  let pendingFinal = '';
 
-// ════════════════════════════════════════════════════════════════════════════
-//  PERSONAS
-// ════════════════════════════════════════════════════════════════════════════
+  btnMic.addEventListener('click', async () => {
+    if ($('orb-container').dataset.state === 'speaking') {
+      // Couper le TTS si l'utilisateur coupe
+      if (STATE.ttsSource) {
+        try { STATE.ttsSource.stop(); } catch {}
+        STATE.ttsSource = null;
+      }
+      stopViz();
+    }
 
-function getPersona(id) { return PERSONAS.find(p => p.id === id) ?? PERSONAS[0]; }
+    if (!isListening) {
+      isListening = true;
+      pendingFinal = '';
 
-function renderPersonaGrid() {
-  personaGrid.innerHTML = PERSONAS.map(p => `
-    <button class="persona-card ${p.id === currentPersonaId ? 'active' : ''}" data-pid="${p.id}" style="--card-clr: ${p.color}" aria-pressed="${p.id === currentPersonaId}">
-      <div class="card-icon">${p.iconSvg}</div>
-      <div class="card-name">${p.name}</div>
-      <div class="card-desc">${p.description}</div>
-    </button>
-  `).join('');
-  personaGrid.querySelectorAll('.persona-card').forEach(card => {
-    card.addEventListener('click', () => { selectPersona(card.dataset.pid); closeModal(); });
+      // Patch Deepgram pour capturer les finals
+      const origStart = startListening.toString();
+
+      // On redéfinit le handler onmessage après startListening
+      await startListening();
+
+      // Patch onmessage pour accumuler les finals dans pendingFinal
+      if (STATE.deepgramSocket) {
+        STATE.deepgramSocket.onmessage = async e => {
+          const msg = JSON.parse(e.data);
+          const alt = msg.channel?.alternatives?.[0];
+          if (!alt) return;
+          const text    = alt.transcript.trim();
+          const isFinal = msg.speech_final;
+          if (!text) return;
+          if (isFinal) {
+            pendingFinal += (pendingFinal ? ' ' : '') + text;
+            showTranscript(pendingFinal, true);
+          } else {
+            showTranscript(pendingFinal + (pendingFinal ? ' ' : '') + text, false);
+          }
+        };
+      }
+    } else {
+      isListening = false;
+      stopListening();
+      if (pendingFinal.trim()) {
+        await processUtterance(pendingFinal.trim());
+      } else {
+        setOrbState('idle');
+      }
+      pendingFinal = '';
+    }
   });
 }
 
-function selectPersona(id) {
-  if (currentSimulationId) return;
-  currentPersonaId = id;
-  conversationHistory = []; fullTranscription = [];
-  conversation.innerHTML = '';
-  if (convEmpty) { conversation.appendChild(convEmpty); convEmpty.style.display = ''; }
-  const p = getPersona(id);
-  personaBadge.textContent = p.name;
-  document.documentElement.style.setProperty('--accent', p.color);
-  document.documentElement.style.setProperty('--clr-idle', p.color);
-  renderPersonaGrid();
+// ─── Bouton Terminer ──────────────────────────────────────────────────────────
+function initEndButton() {
+  $('btn-end').addEventListener('click', endSession);
 }
 
-function openModal() {
-  if (currentState !== State.IDLE && currentState !== State.ERROR) return;
-  renderPersonaGrid();
-  modalOverlay.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
+async function endSession() {
+  const duree = stopTimer();
+  stopListening();
+  if (STATE.ttsSource) { try { STATE.ttsSource.stop(); } catch {} }
+  setOrbState('idle');
+
+  // Sauvegarder en base
+  if (STATE.simulationId) {
+    fetch('/api/simulation/end', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({
+        simulationId: STATE.simulationId,
+        dureeSecondes: duree,
+        transcription: STATE.fullTranscription
+      })
+    }).catch(() => {});
+  }
+
+  // Générer le bilan
+  if (STATE.fullTranscription.length < 2) {
+    // Pas assez de contenu pour un bilan
+    alert('La simulation est trop courte pour générer un bilan.');
+    showBilanEmpty();
+    return;
+  }
+
+  showBilanLoading();
+
+  try {
+    const res = await fetch('/api/bilan', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({
+        simulationId: STATE.simulationId,
+        transcription: STATE.fullTranscription,
+        config      : STATE.currentConfig,
+        personaData : STATE.currentPersona
+      })
+    });
+    const bilan = await res.json();
+    if (!res.ok) throw new Error(bilan.error);
+    showBilan(bilan, duree);
+  } catch (err) {
+    console.error('[Bilan]', err);
+    showBilanError();
+  }
 }
 
-function closeModal() {
-  modalOverlay.classList.add('hidden');
-  document.body.style.overflow = '';
+function showBilanLoading() {
+  $('bilan-note').textContent    = '…';
+  $('bilan-positifs').textContent = 'Analyse en cours…';
+  $('bilan-negatifs').textContent = '';
+  $('bilan-conseils').textContent = '';
+  $('bilan-subtitle').textContent = '';
+  show($('bilan-modal'));
 }
 
-// ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', init);
+function showBilanEmpty() {
+  showBilan({ note_globale: '—', points_positifs: 'Simulation trop courte.', points_negatifs: '', conseils: 'Lance un appel plus long pour obtenir une analyse.' }, 0);
+}
+
+function showBilanError() {
+  showBilan({ note_globale: '—', points_positifs: '', points_negatifs: '', conseils: 'Impossible de générer le bilan (erreur serveur).' }, 0);
+}
+
+function showBilan(bilan, duree) {
+  const p = STATE.currentPersona;
+  const c = STATE.currentConfig;
+  const dureeStr = duree ? `${Math.floor(duree / 60)}m${String(duree % 60).padStart(2, '0')}s` : '';
+  $('bilan-subtitle').textContent = [
+    p ? `${p.prenom} · ${p.poste_exact}` : '',
+    c ? ({ cold_call: 'Cold Call', rdv: 'RDV' }[c.mode] || '') : '',
+    dureeStr
+  ].filter(Boolean).join(' · ');
+
+  $('bilan-note').textContent     = `${bilan.note_globale}/10`;
+  $('bilan-positifs').textContent = bilan.points_positifs || '—';
+  $('bilan-negatifs').textContent = bilan.points_negatifs || '—';
+  $('bilan-conseils').textContent = bilan.conseils || '—';
+
+  show($('bilan-modal'));
+}
+
+function initBilanButtons() {
+  $('btn-bilan-close').addEventListener('click', () => hide($('bilan-modal')));
+
+  $('btn-new-simulation').addEventListener('click', () => {
+    hide($('bilan-modal'));
+    STATE.currentPersona = null;
+    STATE.currentConfig  = { type: 'b2b', mode: 'cold_call', subMode: 'complet', canal: 'fixe', difficulty: 'facile', secteur: '', poste: '', taille: 'pme', produit: '' };
+    showScreen('config-screen');
+    showStep(1);
+    resetOptionTiles();
+    resetInputs();
+  });
+
+  $('btn-replay-config').addEventListener('click', async () => {
+    hide($('bilan-modal'));
+    // Regénérer un persona avec la même config
+    await generatePersona();
+  });
+}
+
+function resetOptionTiles() {
+  document.querySelectorAll('.option-tile[data-group]').forEach(tile => {
+    tile.classList.remove('active');
+    const check = tile.querySelector('.tile-check');
+    if (check) hide(check);
+  });
+  // Remettre les défauts
+  const defaults = { type: 'b2b', mode: 'cold_call', subMode: 'complet', canal: 'fixe', difficulty: 'facile' };
+  Object.entries(defaults).forEach(([group, value]) => {
+    const tile = document.querySelector(`.option-tile[data-group="${group}"][data-value="${value}"]`);
+    if (tile) {
+      tile.classList.add('active');
+      const check = tile.querySelector('.tile-check');
+      if (check) show(check);
+    }
+  });
+}
+
+function resetInputs() {
+  ['input-secteur', 'input-poste', 'input-profil-b2c', 'input-produit'].forEach(id => {
+    const el = $(id);
+    if (el) el.value = '';
+  });
+  const sel = $('select-taille');
+  if (sel) sel.value = 'pme';
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════════════════════════════
+
+document.addEventListener('DOMContentLoaded', () => {
+  initAuth();
+  initConfig();
+  initBriefing();
+  initMicButton();
+  initEndButton();
+  initBilanButtons();
+  showScreen('login-screen');
+});
