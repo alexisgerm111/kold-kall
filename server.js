@@ -17,7 +17,12 @@ const __dirname  = path.dirname(__filename);
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname)));  // fichiers à la racine du projet
+app.use(express.static(__dirname));
+
+// Route explicite GET / — évite "Cannot GET /" sur Render et autres hébergeurs
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 
 // ─── Validation des variables d'environnement ──────────────────────────────
 const REQUIRED = [
