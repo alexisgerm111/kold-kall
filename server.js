@@ -288,7 +288,7 @@ Génère un persona complet. Réponds UNIQUEMENT en JSON valide sans markdown, a
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -441,7 +441,7 @@ Réponds UNIQUEMENT en JSON valide avec cette structure exacte, sans markdown :
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-preview-06-05:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -514,7 +514,7 @@ app.post('/api/chat', async (req, res) => {
     };
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
     );
 
@@ -579,10 +579,10 @@ app.listen(PORT, () => {
   console.log('╚════════════════════════════════════════════╝');
   console.log(`\n🚀  http://localhost:${PORT}`);
   console.log('📡  STT  →  Deepgram nova-3');
-  console.log('🧠  LLM  →  Gemini 2.0 Flash Lite (session)');
-  console.log('🎭  PERSONA → Gemini 2.0 Flash Lite (génération)');
+  console.log('🧠  LLM  →  Gemini 3.5 Flash Lite (session)');
+  console.log('🎭  PERSONA → Gemini 3.5 Flash Lite (génération)');
   console.log('🔊  TTS  →  Cartesia sonic-3.5');
-  console.log('📊  BILAN→  Gemini 2.5 Pro Preview');
+  console.log('📊  BILAN→  Gemini 3.1 Pro Preview');
   console.log('🗄️   BDD  →  Supabase');
   console.log('\n─────────────────────────────────────────────\n');
 });
