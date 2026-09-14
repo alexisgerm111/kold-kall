@@ -16,7 +16,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Validation des variables d'environnement ──────────────────────────────
@@ -25,7 +25,8 @@ const REQUIRED = [
   'GEMINI_API_KEY',
   'CARTESIA_API_KEY',
   'SUPABASE_URL',
-  'SUPABASE_KEY'
+  'SUPABASE_KEY',
+  'SUPABASE_SECRET_KEY'
 ];
 const missing = REQUIRED.filter(k => !process.env[k]);
 if (missing.length > 0) {
@@ -37,6 +38,16 @@ if (missing.length > 0) {
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
+);
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SECRET_KEY,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
+    }
+  }
 );
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -112,13 +123,21 @@ app.post('/api/simulation/start', async (req, res) => {
 
 // POST /api/simulation/end
 app.post('/api/simulation/end', async (req, res) => {
-  const { simulationId, dureeSecondes, transcription = [] } = req.body;
+  const {
+    simulationId,
+    dureeSecondes,
+    transcription = [],
+    audioBase64 = null
+  } = req.body;
+
   if (!simulationId) return res.status(400).json({ error: 'simulationId requis' });
+
   try {
     const { error: simError } = await supabase
       .from('simulations')
       .update({ statut: 'terminee', duree_secondes: dureeSecondes })
       .eq('id', simulationId);
+
     if (simError) throw simError;
 
     if (transcription.length > 0) {
@@ -128,12 +147,56 @@ app.post('/api/simulation/end', async (req, res) => {
         texte: t.texte,
         horodatage_secondes: t.horodatageSecondes || 0
       }));
-      const { error: transError } = await supabase.from('transcriptions').insert(rows);
+
+      const { error: transError } =
+        await supabase.from('transcriptions').insert(rows);
+
       if (transError) throw transError;
+    }
+
+    if (audioBase64) {
+      const { data: simulation, error: simulationError } = await supabase
+        .from('simulations')
+        .select('user_id')
+        .eq('id', simulationId)
+        .single();
+
+      if (simulationError) throw simulationError;
+
+      const audioBuffer = Buffer.from(audioBase64, 'base64');
+      const audioPath = `${simulation.user_id}/${simulationId}.webm`;
+
+      const { error: uploadError } =
+        await supabaseAdmin.storage
+          .from('simulation-audio')
+          .upload(audioPath, audioBuffer, {
+            contentType: 'audio/webm',
+            upsert: true
+          });
+
+      if (uploadError) throw uploadError;
+
+      const { data: signedUrlData, error: signedUrlError } =
+        await supabaseAdmin.storage
+          .from('simulation-audio')
+          .createSignedUrl(audioPath, 60 * 60 * 24 * 30);
+
+      if (signedUrlError) throw signedUrlError;
+
+      const { error: audioDbError } =
+        await supabase
+          .from('simulations')
+          .update({ url_audio: signedUrlData.signedUrl })
+          .eq('id', simulationId);
+
+      if (audioDbError) throw audioDbError;
+
+      console.log(`[Supabase] ✅ Audio enregistré : ${audioPath}`);
     }
 
     console.log(`[Supabase] ✅ Simulation terminée : ${simulationId}`);
     res.json({ success: true });
+
   } catch (err) {
     console.error('[Supabase] Erreur clôture simulation :', err.message);
     res.status(500).json({ error: err.message });
