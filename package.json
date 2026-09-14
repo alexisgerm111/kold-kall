@@ -7,8 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "start:callbot": "node server-callbot.js",
-    "dev:callbot": "node --watch server-callbot.js"
+   
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",
