@@ -65,6 +65,14 @@ let audioCtx        = null;
 let analyserNode    = null;
 let vizFrame        = null;
 
+// Enregistrement complet de la simulation
+let simulationRecorder   = null;
+let recordedAudioChunks  = [];
+let recordingDestination = null;
+
+// Agrégation des segments Deepgram
+let finalUtteranceParts  = [];
+
 // ─── DOM ──────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
@@ -294,39 +302,181 @@ async function startSimulation() {
     currentSimulationId = data.simulationId;
     simulationStartTime = Date.now();
     fullTranscription   = [];
-    btnEnd.classList.remove('hidden');
+btnEnd.classList.remove('hidden');
+
+// Préparer l'enregistrement complet de la simulation
+recordedAudioChunks = [];
+
+if (!audioCtx || audioCtx.state === 'closed') {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+if (audioCtx.state === 'suspended') {
+  await audioCtx.resume();
+}
+
+recordingDestination =
+  audioCtx.createMediaStreamDestination();
+
+const recordingMimeType =
+  MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : 'audio/webm';
+
+simulationRecorder =
+  new MediaRecorder(
+    recordingDestination.stream,
+    { mimeType: recordingMimeType }
+  );
+
+simulationRecorder.addEventListener('dataavailable', ({ data }) => {
+  if (data.size > 0) {
+    recordedAudioChunks.push(data);
+  }
+});
+
+simulationRecorder.start(250);
     console.log(`[Simulation] ▶ Démarrée : ${currentSimulationId}`);
   } catch (err) {
     console.error('[Simulation] Erreur démarrage :', err.message);
   }
 }
 
+async function stopSimulationRecorder() {
+  if (
+    !simulationRecorder ||
+    simulationRecorder.state === 'inactive'
+  ) {
+    return null;
+  }
+
+  return new Promise(resolve => {
+
+    simulationRecorder.addEventListener(
+      'stop',
+      () => {
+
+        const blob =
+          new Blob(
+            recordedAudioChunks,
+            {
+              type:
+                simulationRecorder.mimeType ||
+                'audio/webm'
+            }
+          );
+
+        recordedAudioChunks = [];
+        simulationRecorder = null;
+
+        resolve(blob);
+      },
+      { once: true }
+    );
+
+    simulationRecorder.stop();
+  });
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+
+    const reader = new FileReader();
+
+    reader.onloadend = () => {
+      const result = reader.result;
+      resolve(result.split(',')[1]);
+    };
+
+    reader.onerror = reject;
+
+    reader.readAsDataURL(blob);
+  });
+}
 async function endSimulation() {
   if (!currentSimulationId) return;
+
   const dureeSecondes = Math.floor((Date.now() - simulationStartTime) / 1000);
   const simId = currentSimulationId;
+
   currentSimulationId = null;
   btnEnd.classList.add('hidden');
   btnMic.disabled = true;
-  statusLabel.textContent = 'Génération du bilan...';
+  statusLabel.textContent = 'Enregistrement de la simulation...';
 
   try {
-    // Clôturer en arrière-plan (non bloquant)
-    fetch('/api/simulation/end', {
+    // Arrêter l'enregistrement audio complet
+    let audioBase64 = null;
+
+    if (simulationRecorder && simulationRecorder.state !== 'inactive') {
+      const audioBlob = await new Promise(resolve => {
+        simulationRecorder.addEventListener('stop', () => {
+          resolve(new Blob(recordedAudioChunks, { type: simulationRecorder.mimeType }));
+        }, { once: true });
+
+        try {
+          simulationRecorder.stop();
+        } catch (_) {
+          resolve(null);
+        }
+      });
+
+      if (audioBlob && audioBlob.size > 0) {
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(arrayBuffer);
+        const chunkSize = 0x8000;
+
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+
+        audioBase64 = btoa(binary);
+      }
+    }
+
+    simulationRecorder = null;
+    recordedAudioChunks = [];
+    recordingDestination = null;
+
+    statusLabel.textContent = 'Génération du bilan...';
+
+    // Clôturer la simulation + envoyer l'audio
+    const endRes = await fetch('/api/simulation/end', {
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ simulationId: simId, dureeSecondes, transcription: fullTranscription })
+      body   : JSON.stringify({
+        simulationId: simId,
+        dureeSecondes,
+        transcription: fullTranscription,
+        audioBase64
+      })
     });
+
+    const endData = await endRes.json();
+
+    if (!endRes.ok) {
+      throw new Error(endData.error || 'Erreur clôture simulation');
+    }
 
     // Bilan
     const bilanRes = await fetch('/api/bilan', {
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ simulationId: simId, transcription: fullTranscription })
+      body   : JSON.stringify({
+        simulationId: simId,
+        transcription: fullTranscription
+      })
     });
+
     const bilan = await bilanRes.json();
-    if (!bilanRes.ok) throw new Error(bilan.error);
+
+    if (!bilanRes.ok) {
+      throw new Error(bilan.error || 'Erreur génération bilan');
+    }
+
     showBilan(bilan);
+
   } catch (err) {
     console.error('[Simulation] Erreur fin :', err.message);
     setState(State.IDLE);
@@ -427,6 +577,13 @@ async function startListening() {
     audioStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 }
     });
+    // Ajouter la voix du commercial à l'enregistrement complet
+if (recordingDestination && audioCtx) {
+  const microphoneSource =
+    audioCtx.createMediaStreamSource(audioStream);
+
+  microphoneSource.connect(recordingDestination);
+}
 
     const params = new URLSearchParams({
       model: 'nova-3', language: 'fr', smart_format: 'true',
@@ -450,19 +607,63 @@ async function startListening() {
     });
 
     deepgramSocket.addEventListener('message', async (event) => {
-      if (currentState !== State.LISTENING) return;
-      let data;
-      try { data = JSON.parse(event.data); } catch { return; }
-      if (data.type !== 'Results') return;
-      const transcript = data.channel?.alternatives?.[0]?.transcript || '';
-      if (!transcript.trim()) return;
-      if (!data.is_final) {
-        showTranscript(transcript, 'interim');
-      } else {
-        showTranscript(transcript, 'final');
-        if (data.speech_final && !isProcessing) await processUtterance(transcript.trim());
+  if (currentState !== State.LISTENING) return;
+
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch {
+    return;
+  }
+
+  if (data.type !== 'Results') return;
+
+  const transcript =
+    data.channel?.alternatives?.[0]?.transcript || '';
+
+  if (!transcript.trim()) return;
+
+  if (data.is_final) {
+
+    // Conserver chaque segment final de la prise de parole
+    finalUtteranceParts.push(transcript.trim());
+
+    showTranscript(
+      finalUtteranceParts.join(' '),
+      'final'
+    );
+
+    // speech_final = fin réelle de la prise de parole
+    if (
+      data.speech_final &&
+      !isProcessing
+    ) {
+
+      const completeUtterance =
+        finalUtteranceParts
+          .join(' ')
+          .trim();
+
+      finalUtteranceParts = [];
+
+      if (completeUtterance) {
+        await processUtterance(
+          completeUtterance
+        );
       }
-    });
+    }
+
+  } else {
+
+    showTranscript(
+      [
+        ...finalUtteranceParts,
+        transcript.trim()
+      ].join(' '),
+      'interim'
+    );
+  }
+});
 
     deepgramSocket.addEventListener('error', () => { cleanupAudio(); setState(State.ERROR); setTimeout(() => setState(State.IDLE), 3000); });
     deepgramSocket.addEventListener('close', e => console.log('[DG] Fermé :', e.code));
@@ -476,10 +677,25 @@ async function startListening() {
 
 async function stopListening() {
   if (currentState !== State.LISTENING) return;
-  const pendingText = transcriptLive.textContent.trim();
+
+  const pendingText =
+    finalUtteranceParts
+      .join(' ')
+      .trim();
+
+  finalUtteranceParts = [];
+
   cleanupAudio();
-  if (pendingText && !isProcessing) await processUtterance(pendingText);
-  else if (!isProcessing) { hideTranscript(); setState(State.IDLE); }
+
+  if (
+    pendingText &&
+    !isProcessing
+  ) {
+    await processUtterance(pendingText);
+  } else if (!isProcessing) {
+    hideTranscript();
+    setState(State.IDLE);
+  }
 }
 
 async function processUtterance(userText) {
@@ -553,9 +769,14 @@ async function playTTS(text) {
   const source = audioCtx.createBufferSource();
   source.buffer = decodedData;
   source.connect(analyserNode);
-  analyserNode.connect(audioCtx.destination);
+analyserNode.connect(audioCtx.destination);
 
-  startVisualizer();
+// Ajouter la voix du prospect à l'enregistrement complet
+if (recordingDestination) {
+  analyserNode.connect(recordingDestination);
+}
+
+startVisualizer();
   source.start(0);
 
   return new Promise(resolve => { source.onended = () => { stopVisualizer(); resolve(); }; });
