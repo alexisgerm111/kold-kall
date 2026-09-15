@@ -498,7 +498,7 @@ function showBilan(bilan) {
 
 function closeBilan() {
   bilanModal.classList.add('hidden');
-  // Point 2 — Retour au dashboard après fermeture du bilan
+  // Point 2 — Retour au dashboard
   window.location.href = 'https://alexisgerm111.github.io/daqhboard-kold-kall/';
 }
 
@@ -909,33 +909,31 @@ function closeModal() {
 }
 
 // ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', () => {
+  // init() est synchrone — tous les event listeners sont attachés avant la suite
   init();
 
-  // Point 1 — Si un token est passé depuis le dashboard, bypasser le login
+  // Point 1 — Si un token Supabase est passé depuis le dashboard, bypasser le login
   const params = new URLSearchParams(window.location.search);
   const token  = params.get('token');
+  if (!token) return;
 
-  if (token) {
-    // Nettoyer l'URL (ne pas laisser le token visible)
-    window.history.replaceState({}, '', window.location.pathname);
+  // Nettoyer l'URL immédiatement pour ne pas laisser le token visible
+  window.history.replaceState({}, '', window.location.pathname);
 
-    try {
-      const res = await fetch('/api/auth/login-token', {
-        method : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body   : JSON.stringify({ token })
-      });
-      const data = await res.json();
-      if (res.ok && data.user) {
+  fetch('/api/auth/login-token', {
+    method : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body   : JSON.stringify({ token })
+  })
+    .then(res => res.json().then(data => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (ok && data.user) {
         currentUser    = data.user;
         currentProfile = data.profile;
         showApp();
-        return;
       }
-    } catch (err) {
-      console.warn('[Auth] Token URL invalide, affichage du login :', err.message);
-    }
-  }
-  // Pas de token ou token invalide → login normal
+      // Si invalide → l'écran de login reste visible, rien à faire
+    })
+    .catch(err => console.warn('[Auth] Erreur token URL :', err.message));
 });
