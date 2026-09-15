@@ -1,939 +1,408 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  KOLD KALL V0 — Logique Frontend
-//  Auth complète : login, signup, mot de passe oublié, œil MDP
-//  Pipeline : Deepgram → Gemini 3.5 Flash Lite → Cartesia
-//  Simulation : enregistrement Supabase + bilan Gemini 3.1 Pro Preview
+//  KOLD KALL — Serveur Express
+//  STT : Deepgram nova-3  |  LLM : Gemini 3.5 Flash Lite  |  TTS : Cartesia sonic-3.5
+//  BILAN : Gemini 3.1 Pro Preview  |  BDD : Supabase
 // ════════════════════════════════════════════════════════════════════════════
 
-'use strict';
+import express from 'express';
+import { fileURLToPath } from 'url';
+import path from 'path';
+import dotenv from 'dotenv';
+import { createClient } from '@supabase/supabase-js';
 
-// ─── PERSONAS ────────────────────────────────────────────────────────────────
-const PERSONAS = [
-  {
-    id         : 'prospect_direct',
-    name       : 'Prospect Direct',
-    description: 'Décideur à appeler directement',
-    color      : '#2563EB',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
-    systemPrompt: `Tu joues le rôle d'un prospect (décideur en entreprise) qui reçoit un appel téléphonique commercial à froid. Tu parles en français de façon naturelle. Tu peux être poli mais occupé, légèrement méfiant, parfois intéressé si le commercial est convaincant. Tu poses des objections réalistes (pas le temps, déjà un prestataire, prix...). Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Reste réaliste, pas caricatural. Pas de listes ni de markdown.`
-  },
-  {
-    id         : 'barrage_secretaire',
-    name       : 'Secrétaire Barrage',
-    description: 'Brigitte — filtre les appels',
-    color      : '#DC2626',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>`,
-    systemPrompt: `Tu joues le rôle de Brigitte, secrétaire de direction qui filtre les appels commerciaux pour protéger son patron. Tu parles en français de façon professionnelle mais ferme. Tu demandes systématiquement l'objet de l'appel, tu interroges sur la relation avec le patron, tu peux dire qu'il est en réunion. Si le commercial est vraiment habile et convaincant, tu peux éventuellement passer l'appel. Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Pas de listes ni de markdown.`
-  },
-  {
-    id         : 'client_difficile',
-    name       : 'Client Difficile',
-    description: 'Sceptique et exigeant',
-    color      : '#D97706',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
-    systemPrompt: `Tu joues le rôle d'un prospect sceptique et exigeant pour entraîner des commerciaux. Tu parles en français de façon directe et parfois abrupte. Tu poses des objections sur le prix, tu compares avec la concurrence, tu demandes des preuves concrètes. Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Tu restes réaliste, pas caricatural. Pas de listes ni de markdown.`
-  }
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+const app = express();
+app.use(express.json({ limit: '50mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── Validation des variables d'environnement ──────────────────────────────
+const REQUIRED = [
+  'DEEPGRAM_API_KEY',
+  'GEMINI_API_KEY',
+  'CARTESIA_API_KEY',
+  'SUPABASE_URL',
+  'SUPABASE_KEY',
+  'SUPABASE_SECRET_KEY'
 ];
-
-// ─── ÉTAT GLOBAL ──────────────────────────────────────────────────────────────
-const State = Object.freeze({
-  IDLE     : 'idle',
-  LISTENING: 'listening',
-  THINKING : 'thinking',
-  SPEAKING : 'speaking',
-  ERROR    : 'error'
-});
-
-let currentState        = State.IDLE;
-let currentPersonaId    = 'prospect_direct';
-let conversationHistory = [];
-let isProcessing        = false;
-
-// Session
-let currentUser         = null;
-let currentProfile      = null;
-let currentSimulationId = null;
-let simulationStartTime = null;
-let fullTranscription   = [];
-
-// Audio/réseau
-let deepgramSocket  = null;
-let mediaRecorder   = null;
-let audioStream     = null;
-let keepAliveTimer  = null;
-let audioCtx        = null;
-let analyserNode    = null;
-let vizFrame        = null;
-
-// Enregistrement complet de la simulation
-let simulationRecorder   = null;
-let recordedAudioChunks  = [];
-let recordingDestination = null;
-
-// Agrégation des segments Deepgram
-let finalUtteranceParts  = [];
-
-// ─── DOM ──────────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
-
-// Écrans
-const loginScreen    = $('login-screen');
-const appScreen      = $('app-screen');
-
-// Login
-const loginForm      = $('login-form');
-const loginEmail     = $('login-email');
-const loginPassword  = $('login-password');
-const loginBtn       = $('login-btn');
-const loginError     = $('login-error');
-const toggleEyeLogin = $('toggle-eye-login');
-const btnShowSignup  = $('btn-show-signup');
-const btnForgot      = $('btn-forgot');
-
-// Signup
-const signupPanel    = $('signup-panel');
-const signupNom      = $('signup-nom');
-const signupPrenom   = $('signup-prenom');
-const signupEmail    = $('signup-email');
-const signupPassword = $('signup-password');
-const signupBtn      = $('signup-btn');
-const signupError    = $('signup-error');
-const signupSuccess  = $('signup-success');
-const toggleEyeSignup= $('toggle-eye-signup');
-const btnShowLogin   = $('btn-show-login');
-
-// App
-const userNameEl     = $('user-name');
-const orbContainer   = $('orb-container');
-const statusLabel    = $('status-label');
-const transcriptLive = $('transcript-live');
-const conversation   = $('conversation');
-const convEmpty      = $('conv-empty');
-const btnMic         = $('btn-mic');
-const btnMicLabel    = $('btn-mic-label');
-const btnEnd         = $('btn-end');
-const btnPersona     = $('btn-persona');
-const personaBadge   = $('persona-badge');
-const modalOverlay   = $('modal-overlay');
-const btnSheetClose  = $('btn-sheet-close');
-const personaGrid    = $('persona-grid');
-const audioViz       = $('audio-viz');
-
-// Bilan
-const bilanModal     = $('bilan-modal');
-const bilanNote      = $('bilan-note');
-const bilanPositifs  = $('bilan-positifs');
-const bilanNegatifs  = $('bilan-negatifs');
-const bilanConseils  = $('bilan-conseils');
-const btnBilanClose  = $('btn-bilan-close');
-const btnNewSim      = $('btn-new-simulation');
-
-// Icônes orb
-const iconMic        = $('icon-mic');
-const iconWave       = $('icon-wave');
-const iconLoader     = $('icon-loader');
-const iconSound      = $('icon-sound');
-const iconError      = $('icon-error');
-
-// Icônes bouton mic
-const micIconDefault = $('mic-icon-default');
-const micIconStop    = $('mic-icon-stop');
-
-// ════════════════════════════════════════════════════════════════════════════
-//  INIT
-// ════════════════════════════════════════════════════════════════════════════
-
-function init() {
-  // Login
-  loginForm.addEventListener('submit', handleLogin);
-  toggleEyeLogin.addEventListener('click', () => togglePasswordVisibility(loginPassword, toggleEyeLogin));
-  btnShowSignup.addEventListener('click', showSignupPanel);
-  btnForgot.addEventListener('click', handleForgotPassword);
-
-  // Signup
-  signupBtn.addEventListener('click', handleSignup);
-  toggleEyeSignup.addEventListener('click', () => togglePasswordVisibility(signupPassword, toggleEyeSignup));
-  btnShowLogin.addEventListener('click', showLoginPanel);
-
-  // App
-  btnMic.addEventListener('click', handleMicClick);
-  btnEnd.addEventListener('click', endSimulation);
-  btnBilanClose.addEventListener('click', closeBilan);
-  btnNewSim.addEventListener('click', resetSimulation);
-  btnPersona.addEventListener('click', openModal);
-  btnSheetClose.addEventListener('click', closeModal);
-  modalOverlay.addEventListener('click', e => { if (e.target === modalOverlay) closeModal(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+const missing = REQUIRED.filter(k => !process.env[k]);
+if (missing.length > 0) {
+  console.error(`\n❌  Variables manquantes : ${missing.join(', ')}`);
+  process.exit(1);
 }
+
+// ─── Client Supabase ────────────────────────────────────────────────────────
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SECRET_KEY,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
+    }
+  }
+);
 
 // ════════════════════════════════════════════════════════════════════════════
 //  AUTH
 // ════════════════════════════════════════════════════════════════════════════
 
-function togglePasswordVisibility(input, btn) {
-  const isHidden = input.type === 'password';
-  input.type = isHidden ? 'text' : 'password';
-  btn.innerHTML = isHidden
-    ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" x2="23" y1="1" y2="23"/></svg>`
-    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
-}
-
-function showSignupPanel() {
-  signupPanel.classList.remove('hidden');
-  loginForm.classList.add('hidden');
-  loginError.textContent = '';
-}
-
-function showLoginPanel() {
-  signupPanel.classList.add('hidden');
-  loginForm.classList.remove('hidden');
-  signupError.textContent = '';
-  signupSuccess.textContent = '';
-}
-
-async function handleLogin(e) {
-  e.preventDefault();
-  loginError.textContent = '';
-  loginBtn.disabled = true;
-  loginBtn.textContent = 'Connexion...';
-
+// POST /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email et mot de passe requis' });
   try {
-    const res = await fetch('/api/auth/login', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ email: loginEmail.value.trim(), password: loginPassword.value })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Erreur de connexion');
-    currentUser    = data.user;
-    currentProfile = data.profile;
-    showApp();
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return res.status(401).json({ error: error.message });
+    const { data: profile } = await supabase.from('profiles').select('*').eq('id', data.user.id).single();
+    res.json({ user: data.user, session: data.session, profile });
   } catch (err) {
-    loginError.textContent = err.message;
-  } finally {
-    loginBtn.disabled = false;
-    loginBtn.textContent = 'Se connecter';
+    res.status(500).json({ error: err.message });
   }
-}
+});
 
-async function handleSignup() {
-  signupError.textContent   = '';
-  signupSuccess.textContent = '';
-  signupBtn.disabled = true;
-  signupBtn.textContent = 'Création...';
-
+// POST /api/auth/signup
+app.post('/api/auth/signup', async (req, res) => {
+  const { email, password, nom, prenom } = req.body;
+  if (!email || !password || !nom || !prenom) return res.status(400).json({ error: 'Tous les champs sont requis' });
   try {
-    const res = await fetch('/api/auth/signup', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        email   : signupEmail.value.trim(),
-        password: signupPassword.value,
-        nom     : signupNom.value.trim(),
-        prenom  : signupPrenom.value.trim()
-      })
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { nom, prenom, role: 'commercial' } }
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    signupSuccess.textContent = '✅ Compte créé ! Vérifiez votre email puis connectez-vous.';
-    setTimeout(showLoginPanel, 3000);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ user: data.user, message: 'Compte créé. Vérifiez votre email pour confirmer.' });
   } catch (err) {
-    signupError.textContent = err.message;
-  } finally {
-    signupBtn.disabled = false;
-    signupBtn.textContent = 'Créer mon compte';
+    res.status(500).json({ error: err.message });
   }
-}
+});
 
-async function handleForgotPassword() {
-  const email = loginEmail.value.trim();
-  if (!email) {
-    loginError.textContent = 'Entrez votre email ci-dessus puis cliquez sur ce lien.';
-    return;
-  }
-  loginError.textContent = '';
+// POST /api/auth/login-token — SSO depuis le dashboard
+app.post('/api/auth/login-token', async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Token requis' });
   try {
-    const res = await fetch('/api/auth/reset-password', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ email })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    loginError.style.color = 'var(--success)';
-    loginError.textContent = '✅ Email de réinitialisation envoyé.';
-    setTimeout(() => {
-      loginError.style.color = '';
-      loginError.textContent = '';
-    }, 4000);
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ error: 'Token invalide ou expiré' });
+    const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+    res.json({ user, profile });
   } catch (err) {
-    loginError.textContent = err.message;
+    res.status(500).json({ error: err.message });
   }
-}
+});
 
-function showApp() {
-  loginScreen.classList.add('hidden');
-  appScreen.classList.remove('hidden');
-  const prenom = currentProfile?.prenom || currentUser?.email?.split('@')[0] || 'Utilisateur';
-  userNameEl.textContent = prenom;
-  renderPersonaGrid();
-  setState(State.IDLE);
-}
+// POST /api/auth/reset-password
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email requis' });
+  try {
+    const { error } = await supabase.auth.resetPasswordForEmail(email);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ message: 'Email de réinitialisation envoyé.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 //  SIMULATION
 // ════════════════════════════════════════════════════════════════════════════
 
-async function startSimulation() {
-  if (!currentUser) return;
+// POST /api/simulation/start
+app.post('/api/simulation/start', async (req, res) => {
+  const { userId, typeScenario = 'prospect_direct', niveauDifficulte = 'moyen', modeJeu = 'entrainement' } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId requis' });
   try {
-    const res = await fetch('/api/simulation/start', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        userId          : currentUser.id,
-        typeScenario    : currentPersonaId,
-        niveauDifficulte: 'moyen',
-        modeJeu         : 'entrainement'
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    currentSimulationId = data.simulationId;
-    simulationStartTime = Date.now();
-    fullTranscription   = [];
-btnEnd.classList.remove('hidden');
-
-// Préparer l'enregistrement complet de la simulation
-recordedAudioChunks = [];
-
-if (!audioCtx || audioCtx.state === 'closed') {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-}
-
-if (audioCtx.state === 'suspended') {
-  await audioCtx.resume();
-}
-
-recordingDestination =
-  audioCtx.createMediaStreamDestination();
-
-const recordingMimeType =
-  MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus'
-    : 'audio/webm';
-
-simulationRecorder =
-  new MediaRecorder(
-    recordingDestination.stream,
-    { mimeType: recordingMimeType }
-  );
-
-simulationRecorder.addEventListener('dataavailable', ({ data }) => {
-  if (data.size > 0) {
-    recordedAudioChunks.push(data);
+    const { data, error } = await supabase
+      .from('simulations')
+      .insert({ user_id: userId, type_scenario: typeScenario, niveau_difficulte: niveauDifficulte, mode_jeu: modeJeu, statut: 'en_cours' })
+      .select()
+      .single();
+    if (error) throw error;
+    console.log(`[Supabase] ✅ Simulation créée : ${data.id}`);
+    res.json({ simulationId: data.id });
+  } catch (err) {
+    console.error('[Supabase] Erreur création simulation :', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-simulationRecorder.start(250);
-    console.log(`[Simulation] ▶ Démarrée : ${currentSimulationId}`);
+// POST /api/simulation/end
+app.post('/api/simulation/end', async (req, res) => {
+  const {
+    simulationId,
+    dureeSecondes,
+    transcription = [],
+    audioBase64 = null
+  } = req.body;
+
+  if (!simulationId) return res.status(400).json({ error: 'simulationId requis' });
+
+  try {
+    const { error: simError } = await supabase
+      .from('simulations')
+      .update({ statut: 'terminee', duree_secondes: dureeSecondes })
+      .eq('id', simulationId);
+
+    if (simError) throw simError;
+
+    if (transcription.length > 0) {
+      const rows = transcription.map(t => ({
+        simulation_id: simulationId,
+        locuteur: t.locuteur,
+        texte: t.texte,
+        horodatage_secondes: t.horodatageSecondes || 0
+      }));
+
+      const { error: transError } =
+        await supabase.from('transcriptions').insert(rows);
+
+      if (transError) throw transError;
+    }
+
+    if (audioBase64) {
+      const { data: simulation, error: simulationError } = await supabase
+        .from('simulations')
+        .select('user_id')
+        .eq('id', simulationId)
+        .single();
+
+      if (simulationError) throw simulationError;
+
+      const audioBuffer = Buffer.from(audioBase64, 'base64');
+      const audioPath = `${simulation.user_id}/${simulationId}.webm`;
+
+      const { error: uploadError } =
+        await supabaseAdmin.storage
+          .from('simulation-audio')
+          .upload(audioPath, audioBuffer, {
+            contentType: 'audio/webm',
+            upsert: true
+          });
+
+      if (uploadError) throw uploadError;
+
+      const { data: signedUrlData, error: signedUrlError } =
+        await supabaseAdmin.storage
+          .from('simulation-audio')
+          .createSignedUrl(audioPath, 60 * 60 * 24 * 30);
+
+      if (signedUrlError) throw signedUrlError;
+
+      const { error: audioDbError } =
+        await supabase
+          .from('simulations')
+          .update({ url_audio: signedUrlData.signedUrl })
+          .eq('id', simulationId);
+
+      if (audioDbError) throw audioDbError;
+
+      console.log(`[Supabase] ✅ Audio enregistré : ${audioPath}`);
+    }
+
+    console.log(`[Supabase] ✅ Simulation terminée : ${simulationId}`);
+    res.json({ success: true });
+
   } catch (err) {
-    console.error('[Simulation] Erreur démarrage :', err.message);
+    console.error('[Supabase] Erreur clôture simulation :', err.message);
+    res.status(500).json({ error: err.message });
   }
-}
+});
 
-async function stopSimulationRecorder() {
-  if (
-    !simulationRecorder ||
-    simulationRecorder.state === 'inactive'
-  ) {
-    return null;
-  }
+// POST /api/bilan — Gemini 3.1 Pro Preview (modèle séparé, sans biais)
+app.post('/api/bilan', async (req, res) => {
+  const { simulationId, transcription = [] } = req.body;
+  if (!simulationId) return res.status(400).json({ error: 'simulationId requis' });
 
-  return new Promise(resolve => {
+  const dialogueTexte = transcription
+    .map(t => `${t.locuteur === 'commercial' ? '🧑 Commercial' : '🤖 Prospect IA'} : ${t.texte}`)
+    .join('\n');
 
-    simulationRecorder.addEventListener(
-      'stop',
-      () => {
+  const prompt = `Tu es un expert en techniques de vente et en cold calling. Analyse cette simulation d'appel téléphonique et donne un bilan structuré.
 
-        const blob =
-          new Blob(
-            recordedAudioChunks,
-            {
-              type:
-                simulationRecorder.mimeType ||
-                'audio/webm'
-            }
-          );
+TRANSCRIPTION :
+${dialogueTexte}
 
-        recordedAudioChunks = [];
-        simulationRecorder = null;
+Réponds UNIQUEMENT en JSON valide avec cette structure exacte, sans markdown :
+{
+  "note_globale": <nombre entre 0 et 10>,
+  "points_positifs": "<ce que le commercial a bien fait, en 2-3 phrases>",
+  "points_negatifs": "<ce qu'il doit améliorer, en 2-3 phrases>",
+  "conseils": "<conseils concrets et actionnables, en 2-3 phrases>"
+}`;
 
-        resolve(blob);
-      },
-      { once: true }
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 500, temperature: 0.3 }
+        })
+      }
     );
 
-    simulationRecorder.stop();
-  });
-}
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Gemini 3.1 Pro Preview ${response.status}: ${errText}`);
+    }
 
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
+    const data = await response.json();
+    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const cleanJson = rawText.replace(/```json|```/g, '').trim();
+    const bilan = JSON.parse(cleanJson);
 
-    const reader = new FileReader();
+    const { error: bilanError } = await supabase.from('bilans').insert({
+      simulation_id: simulationId,
+      note_globale: bilan.note_globale,
+      points_positifs: bilan.points_positifs,
+      points_negatifs: bilan.points_negatifs,
+      conseils: bilan.conseils,
+      modele_ia: 'gemini-3.1-pro-preview'
+    });
+    if (bilanError) throw bilanError;
 
-    reader.onloadend = () => {
-      const result = reader.result;
-      resolve(result.split(',')[1]);
+    console.log(`[Supabase] ✅ Bilan enregistré : ${simulationId}`);
+    res.json(bilan);
+  } catch (err) {
+    console.error('[Bilan] Erreur :', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/simulation/:id/audio — URL signée fraîche pour l'audio (dashboard)
+app.get('/api/simulation/:id/audio', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data: sim, error: simError } = await supabase
+      .from('simulations')
+      .select('user_id, url_audio')
+      .eq('id', id)
+      .single();
+
+    if (simError || !sim) return res.status(404).json({ error: 'Simulation introuvable' });
+    if (!sim.url_audio) return res.status(404).json({ error: 'Aucun audio pour cette simulation' });
+
+    const filePath = `${sim.user_id}/${id}.webm`;
+
+    const { data: signed, error: signError } = await supabaseAdmin.storage
+      .from('simulation-audio')
+      .createSignedUrl(filePath, 60 * 60); // 1h
+
+    if (signError) throw signError;
+
+    // CORS : autoriser le dashboard GitHub Pages
+    res.set('Access-Control-Allow-Origin', 'https://alexisgerm111.github.io');
+    res.json({ signedUrl: signed.signedUrl });
+  } catch (err) {
+    console.error('[Audio] Erreur génération URL signée :', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  IA VOCALE
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/deepgram-token
+app.get('/api/deepgram-token', (_req, res) => {
+  res.json({ token: process.env.DEEPGRAM_API_KEY });
+});
+
+// POST /api/chat — Gemini 3.5 Flash Lite (vocal, temps réel)
+app.post('/api/chat', async (req, res) => {
+  const { messages, systemPrompt } = req.body;
+  try {
+    const contents = messages.map(msg => ({
+      role: msg.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: typeof msg.content === 'string' ? msg.content : msg.content[0]?.text || '' }]
+    }));
+
+    const payload = {
+      contents,
+      generationConfig: { maxOutputTokens: 300, temperature: 0.7 }
     };
+    if (systemPrompt) payload.systemInstruction = { parts: [{ text: systemPrompt }] };
 
-    reader.onerror = reject;
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
+    );
 
-    reader.readAsDataURL(blob);
-  });
-}
-async function endSimulation() {
-  if (!currentSimulationId) return;
-
-  const dureeSecondes = Math.floor((Date.now() - simulationStartTime) / 1000);
-  const simId = currentSimulationId;
-
-  currentSimulationId = null;
-  btnEnd.classList.add('hidden');
-  btnMic.disabled = true;
-  statusLabel.textContent = 'Enregistrement de la simulation...';
-
-  try {
-    // Arrêter l'enregistrement audio complet
-    let audioBase64 = null;
-
-    if (simulationRecorder && simulationRecorder.state !== 'inactive') {
-      const audioBlob = await new Promise(resolve => {
-        simulationRecorder.addEventListener('stop', () => {
-          resolve(new Blob(recordedAudioChunks, { type: simulationRecorder.mimeType }));
-        }, { once: true });
-
-        try {
-          simulationRecorder.stop();
-        } catch (_) {
-          resolve(null);
-        }
-      });
-
-      if (audioBlob && audioBlob.size > 0) {
-        const arrayBuffer = await audioBlob.arrayBuffer();
-        let binary = '';
-        const bytes = new Uint8Array(arrayBuffer);
-        const chunkSize = 0x8000;
-
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-        }
-
-        audioBase64 = btoa(binary);
-      }
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('[Gemini] Erreur API :', response.status, errText);
+      return res.status(response.status).json({ error: errText });
     }
 
-    simulationRecorder = null;
-    recordedAudioChunks = [];
-    recordingDestination = null;
-
-    statusLabel.textContent = 'Génération du bilan...';
-
-    // Clôturer la simulation + envoyer l'audio
-    const endRes = await fetch('/api/simulation/end', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        simulationId: simId,
-        dureeSecondes,
-        transcription: fullTranscription,
-        audioBase64
-      })
-    });
-
-    const endData = await endRes.json();
-
-    if (!endRes.ok) {
-      throw new Error(endData.error || 'Erreur clôture simulation');
-    }
-
-    // Bilan
-    const bilanRes = await fetch('/api/bilan', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        simulationId: simId,
-        transcription: fullTranscription
-      })
-    });
-
-    const bilan = await bilanRes.json();
-
-    if (!bilanRes.ok) {
-      throw new Error(bilan.error || 'Erreur génération bilan');
-    }
-
-    showBilan(bilan);
-
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    console.log(`[Gemini] ← "${text.substring(0, 80)}${text.length > 80 ? '…' : ''}"`);
+    res.json({ text });
   } catch (err) {
-    console.error('[Simulation] Erreur fin :', err.message);
-    setState(State.IDLE);
-    btnMic.disabled = false;
-  }
-}
-
-function showBilan(bilan) {
-  bilanNote.textContent     = `${bilan.note_globale}/10`;
-  bilanPositifs.textContent = bilan.points_positifs;
-  bilanNegatifs.textContent = bilan.points_negatifs;
-  bilanConseils.textContent = bilan.conseils;
-  const note = bilan.note_globale;
-  bilanNote.style.color = note >= 7 ? '#22C55E' : note >= 5 ? '#F59E0B' : '#EF4444';
-  bilanModal.classList.remove('hidden');
-  setState(State.IDLE);
-  btnMic.disabled = false;
-}
-
-function closeBilan() {
-  bilanModal.classList.add('hidden');
-  // Point 2 — Retour au dashboard
-  window.location.href = 'https://alexisgerm111.github.io/daqhboard-kold-kall/';
-}
-
-function resetSimulation() {
-  closeBilan();
-  conversationHistory = [];
-  fullTranscription   = [];
-  conversation.innerHTML = '';
-  if (convEmpty) { conversation.appendChild(convEmpty); convEmpty.style.display = ''; }
-  setState(State.IDLE);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  MACHINE D'ÉTAT
-// ════════════════════════════════════════════════════════════════════════════
-
-function setState(newState) {
-  currentState = newState;
-  orbContainer.dataset.state = newState;
-
-  const STATUS = {
-    [State.IDLE]     : 'Prêt à écouter',
-    [State.LISTENING]: 'En écoute...',
-    [State.THINKING] : 'Je réfléchis...',
-    [State.SPEAKING] : 'Je vous réponds...',
-    [State.ERROR]    : 'Une erreur est survenue'
-  };
-  const BTN_LABELS = {
-    [State.IDLE]     : 'Parler',
-    [State.LISTENING]: 'Arrêter',
-    [State.THINKING] : 'Patientez...',
-    [State.SPEAKING] : 'Patientez...',
-    [State.ERROR]    : 'Réessayer'
-  };
-
-  statusLabel.textContent = STATUS[newState] || '';
-  btnMicLabel.textContent = BTN_LABELS[newState] || '';
-
-  [iconMic, iconWave, iconLoader, iconSound, iconError].forEach(el => el.classList.add('hidden'));
-  ({ [State.IDLE]: iconMic, [State.LISTENING]: iconWave, [State.THINKING]: iconLoader, [State.SPEAKING]: iconSound, [State.ERROR]: iconError })[newState]?.classList.remove('hidden');
-
-  btnMic.disabled = (newState === State.THINKING || newState === State.SPEAKING);
-
-  if (newState === State.LISTENING) {
-    btnMic.classList.add('listening');
-    micIconDefault.classList.add('hidden');
-    micIconStop.classList.remove('hidden');
-    btnMic.setAttribute('aria-label', "Arrêter l'écoute");
-  } else {
-    btnMic.classList.remove('listening');
-    micIconDefault.classList.remove('hidden');
-    micIconStop.classList.add('hidden');
-    btnMic.setAttribute('aria-label', 'Commencer à parler');
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  PIPELINE VOCAL — Son non bloquant (TTS parallèle au stockage)
-// ════════════════════════════════════════════════════════════════════════════
-
-async function handleMicClick() {
-  if (!currentSimulationId && (currentState === State.IDLE || currentState === State.ERROR)) {
-    await startSimulation();
-  }
-  if (currentState === State.IDLE || currentState === State.ERROR) {
-    await startListening();
-  } else if (currentState === State.LISTENING) {
-    await stopListening();
-  }
-}
-
-async function startListening() {
-  try {
-    if (!navigator.mediaDevices?.getUserMedia) { alert("Navigateur non supporté."); return; }
-
-    const tokenRes = await fetch('/api/deepgram-token');
-    if (!tokenRes.ok) throw new Error('Token Deepgram indisponible');
-    const { token } = await tokenRes.json();
-
-    audioStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 }
-    });
-    // Ajouter la voix du commercial à l'enregistrement complet
-if (recordingDestination && audioCtx) {
-  const microphoneSource =
-    audioCtx.createMediaStreamSource(audioStream);
-
-  microphoneSource.connect(recordingDestination);
-}
-
-    const params = new URLSearchParams({
-      model: 'nova-3', language: 'fr', smart_format: 'true',
-      interim_results: 'true', punctuate: 'true',
-      endpointing: '1200', utterance_end_ms: '1500'
-    });
-
-    deepgramSocket = new WebSocket(`wss://api.deepgram.com/v1/listen?${params}`, ['token', token]);
-
-    deepgramSocket.addEventListener('open', () => {
-      setState(State.LISTENING);
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-      mediaRecorder = new MediaRecorder(audioStream, { mimeType });
-      mediaRecorder.addEventListener('dataavailable', ({ data }) => {
-        if (data.size > 0 && deepgramSocket?.readyState === WebSocket.OPEN) deepgramSocket.send(data);
-      });
-      mediaRecorder.start(250);
-      keepAliveTimer = setInterval(() => {
-        if (deepgramSocket?.readyState === WebSocket.OPEN) deepgramSocket.send(JSON.stringify({ type: 'KeepAlive' }));
-      }, 5000);
-    });
-
-    deepgramSocket.addEventListener('message', async (event) => {
-  if (currentState !== State.LISTENING) return;
-
-  let data;
-  try {
-    data = JSON.parse(event.data);
-  } catch {
-    return;
-  }
-
-  if (data.type !== 'Results') return;
-
-  const transcript =
-    data.channel?.alternatives?.[0]?.transcript || '';
-
-  if (!transcript.trim()) return;
-
-  if (data.is_final) {
-
-    // Conserver chaque segment final de la prise de parole
-    finalUtteranceParts.push(transcript.trim());
-
-    showTranscript(
-      finalUtteranceParts.join(' '),
-      'final'
-    );
-
-    // speech_final = fin réelle de la prise de parole
-    if (
-      data.speech_final &&
-      !isProcessing
-    ) {
-
-      const completeUtterance =
-        finalUtteranceParts
-          .join(' ')
-          .trim();
-
-      finalUtteranceParts = [];
-
-      if (completeUtterance) {
-        await processUtterance(
-          completeUtterance
-        );
-      }
-    }
-
-  } else {
-
-    showTranscript(
-      [
-        ...finalUtteranceParts,
-        transcript.trim()
-      ].join(' '),
-      'interim'
-    );
+    console.error('[Gemini] Exception :', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-    deepgramSocket.addEventListener('error', () => { cleanupAudio(); setState(State.ERROR); setTimeout(() => setState(State.IDLE), 3000); });
-    deepgramSocket.addEventListener('close', e => console.log('[DG] Fermé :', e.code));
-  } catch (err) {
-    if (err.name === 'NotAllowedError') alert('Accès au microphone refusé.');
-    cleanupAudio();
-    setState(State.ERROR);
-    setTimeout(() => setState(State.IDLE), 3000);
-  }
-}
-
-async function stopListening() {
-  if (currentState !== State.LISTENING) return;
-
-  const pendingText =
-    finalUtteranceParts
-      .join(' ')
-      .trim();
-
-  finalUtteranceParts = [];
-
-  cleanupAudio();
-
-  if (
-    pendingText &&
-    !isProcessing
-  ) {
-    await processUtterance(pendingText);
-  } else if (!isProcessing) {
-    hideTranscript();
-    setState(State.IDLE);
-  }
-}
-
-async function processUtterance(userText) {
-  if (isProcessing || !userText) return;
-  isProcessing = true;
-  cleanupAudio();
-  addMessage('user', userText);
-  hideTranscript();
-
-  const elapsed = simulationStartTime ? Math.floor((Date.now() - simulationStartTime) / 1000) : 0;
-  fullTranscription.push({ locuteur: 'commercial', texte: userText, horodatageSecondes: elapsed });
-  conversationHistory.push({ role: 'user', content: userText });
-
-  setState(State.THINKING);
-
+// POST /api/tts — Cartesia sonic-3.5
+app.post('/api/tts', async (req, res) => {
+  const { text } = req.body;
+  const voiceId = process.env.CARTESIA_VOICE_ID || 'a249eaff-1e96-4d2c-b23b-12efa4f66f41';
   try {
-    const persona = getPersona(currentPersonaId);
-
-    // ── LLM ─────────────────────────────────────────────────────────────────
-    const chatRes = await fetch('/api/chat', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ messages: conversationHistory, systemPrompt: persona.systemPrompt })
+    const response = await fetch('https://api.cartesia.ai/tts/bytes', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.CARTESIA_API_KEY}`,
+        'Cartesia-Version': '2026-03-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model_id: 'sonic-3.5',
+        transcript: text,
+        language: 'fr',
+        voice: { mode: 'id', id: voiceId },
+        output_format: { container: 'wav', encoding: 'pcm_f32le', sample_rate: 44100 },
+      }),
     });
-    if (!chatRes.ok) throw new Error(`Chat API ${chatRes.status}`);
-    const { text: aiText } = await chatRes.json();
 
-    addMessage('ai', aiText);
-    conversationHistory.push({ role: 'assistant', content: aiText });
-
-    const elapsedAi = simulationStartTime ? Math.floor((Date.now() - simulationStartTime) / 1000) : 0;
-    fullTranscription.push({ locuteur: 'ia', texte: aiText, horodatageSecondes: elapsedAi });
-
-    // ── TTS — immédiat, sans attendre autre chose ────────────────────────────
-    setState(State.SPEAKING);
-    await playTTS(aiText);
-    setState(State.IDLE);
-
-  } catch (err) {
-    console.error('[Pipeline] Erreur :', err.message);
-    addMessage('ai', 'Désolé, une erreur est survenue. Veuillez réessayer.');
-    setState(State.ERROR);
-    setTimeout(() => setState(State.IDLE), 2500);
-  } finally {
-    isProcessing = false;
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  TTS + AUDIO
-// ════════════════════════════════════════════════════════════════════════════
-
-async function playTTS(text) {
-  const ttsRes = await fetch('/api/tts', {
-    method : 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body   : JSON.stringify({ text })
-  });
-  if (!ttsRes.ok) throw new Error(`Cartesia ${ttsRes.status}`);
-
-  const arrayBuffer = await ttsRes.arrayBuffer();
-
-  if (!audioCtx || audioCtx.state === 'closed') audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-  analyserNode = audioCtx.createAnalyser();
-  analyserNode.fftSize = 256;
-  analyserNode.smoothingTimeConstant = 0.75;
-
-  const decodedData = await audioCtx.decodeAudioData(arrayBuffer);
-  const source = audioCtx.createBufferSource();
-  source.buffer = decodedData;
-  source.connect(analyserNode);
-analyserNode.connect(audioCtx.destination);
-
-// Ajouter la voix du prospect à l'enregistrement complet
-if (recordingDestination) {
-  analyserNode.connect(recordingDestination);
-}
-
-startVisualizer();
-  source.start(0);
-
-  return new Promise(resolve => { source.onended = () => { stopVisualizer(); resolve(); }; });
-}
-
-function startVisualizer() {
-  if (!analyserNode) return;
-  audioViz.style.opacity = '1';
-  const ctx = audioViz.getContext('2d');
-  const bufLen = analyserNode.frequencyBinCount;
-  const data = new Uint8Array(bufLen);
-  const BARS = 28, stride = Math.floor(bufLen / BARS);
-  const W = audioViz.width, H = audioViz.height, gap = 3, barW = (W - gap * (BARS - 1)) / BARS;
-
-  function draw() {
-    vizFrame = requestAnimationFrame(draw);
-    analyserNode.getByteFrequencyData(data);
-    ctx.clearRect(0, 0, W, H);
-    for (let i = 0; i < BARS; i++) {
-      const val = data[i * stride] / 255;
-      const barH = Math.max(4, val * H * 0.88);
-      const x = i * (barW + gap), y = (H - barH) / 2;
-      const grad = ctx.createLinearGradient(x, y, x, y + barH);
-      grad.addColorStop(0, `rgba(108, 99, 255, ${0.4 + val * 0.6})`);
-      grad.addColorStop(1, `rgba(16, 185, 129, ${0.4 + val * 0.6})`);
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(x, y, barW, barH, 2);
-      else ctx.rect(x, y, barW, barH);
-      ctx.fill();
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('[Cartesia] Erreur API :', response.status, errText);
+      return res.status(response.status).json({ error: errText });
     }
+
+    const buffer = await response.arrayBuffer();
+    console.log(`[Cartesia] Audio généré → ${(buffer.byteLength / 1024).toFixed(1)} KB`);
+    res.set('Content-Type', 'audio/wav');
+    res.send(Buffer.from(buffer));
+  } catch (err) {
+    console.error('[Cartesia] Exception :', err.message);
+    res.status(500).json({ error: err.message });
   }
-  draw();
-}
+});
 
-function stopVisualizer() {
-  cancelAnimationFrame(vizFrame);
-  vizFrame = null;
-  audioViz.style.opacity = '0';
-  audioViz.getContext('2d').clearRect(0, 0, audioViz.width, audioViz.height);
-}
-
-function cleanupAudio() {
-  clearInterval(keepAliveTimer); keepAliveTimer = null;
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch (_) {} }
-  mediaRecorder = null;
-  if (deepgramSocket) {
-    try { if (deepgramSocket.readyState === WebSocket.OPEN) deepgramSocket.send(JSON.stringify({ type: 'CloseStream' })); deepgramSocket.close(); } catch (_) {}
-    deepgramSocket = null;
-  }
-  if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  UI HELPERS
-// ════════════════════════════════════════════════════════════════════════════
-
-function showTranscript(text, mode) {
-  transcriptLive.textContent = text;
-  transcriptLive.className   = `transcript-live visible ${mode}`;
-}
-
-function hideTranscript() {
-  transcriptLive.textContent = '';
-  transcriptLive.className   = 'transcript-live';
-}
-
-function addMessage(role, text) {
-  if (convEmpty) convEmpty.style.display = 'none';
-  const isUser = role === 'user';
-  const userSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
-  const aiSvg   = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="10" x="3" y="11" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" x2="8" y1="16" y2="16"/><line x1="16" x2="16" y1="16" y2="16"/></svg>`;
-  const el = document.createElement('div');
-  el.className = `message ${role}`;
-  el.innerHTML = `<div class="msg-avatar" aria-hidden="true">${isUser ? userSvg : aiSvg}</div><div class="msg-bubble">${escapeHtml(text)}</div>`;
-  conversation.appendChild(el);
-  requestAnimationFrame(() => conversation.scrollTo({ top: conversation.scrollHeight, behavior: 'smooth' }));
-}
-
-function escapeHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;').replace(/\n/g,'<br>');
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  PERSONAS
-// ════════════════════════════════════════════════════════════════════════════
-
-function getPersona(id) { return PERSONAS.find(p => p.id === id) ?? PERSONAS[0]; }
-
-function renderPersonaGrid() {
-  personaGrid.innerHTML = PERSONAS.map(p => `
-    <button class="persona-card ${p.id === currentPersonaId ? 'active' : ''}" data-pid="${p.id}" style="--card-clr: ${p.color}" aria-pressed="${p.id === currentPersonaId}">
-      <div class="card-icon">${p.iconSvg}</div>
-      <div class="card-name">${p.name}</div>
-      <div class="card-desc">${p.description}</div>
-    </button>
-  `).join('');
-  personaGrid.querySelectorAll('.persona-card').forEach(card => {
-    card.addEventListener('click', () => { selectPersona(card.dataset.pid); closeModal(); });
-  });
-}
-
-function selectPersona(id) {
-  if (currentSimulationId) return;
-  currentPersonaId = id;
-  conversationHistory = []; fullTranscription = [];
-  conversation.innerHTML = '';
-  if (convEmpty) { conversation.appendChild(convEmpty); convEmpty.style.display = ''; }
-  const p = getPersona(id);
-  personaBadge.textContent = p.name;
-  document.documentElement.style.setProperty('--accent', p.color);
-  document.documentElement.style.setProperty('--clr-idle', p.color);
-  renderPersonaGrid();
-}
-
-function openModal() {
-  if (currentState !== State.IDLE && currentState !== State.ERROR) return;
-  renderPersonaGrid();
-  modalOverlay.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-}
-
-function closeModal() {
-  modalOverlay.classList.add('hidden');
-  document.body.style.overflow = '';
-}
-
-// ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  // init() est synchrone — tous les event listeners sont attachés avant la suite
-  init();
-
-  // Point 1 — Si un token Supabase est passé depuis le dashboard, bypasser le login
-  const params = new URLSearchParams(window.location.search);
-  const token  = params.get('token');
-  if (!token) return;
-
-  // Nettoyer l'URL immédiatement pour ne pas laisser le token visible
-  window.history.replaceState({}, '', window.location.pathname);
-
-  fetch('/api/auth/login-token', {
-    method : 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body   : JSON.stringify({ token })
-  })
-    .then(res => res.json().then(data => ({ ok: res.ok, data })))
-    .then(({ ok, data }) => {
-      if (ok && data.user) {
-        currentUser    = data.user;
-        currentProfile = data.profile;
-        showApp();
-      }
-      // Si invalide → l'écran de login reste visible, rien à faire
-    })
-    .catch(err => console.warn('[Auth] Erreur token URL :', err.message));
+// ─── Démarrage ──────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('\n╔════════════════════════════════════════════╗');
+  console.log('║        🎙️   KOLD KALL  V0                 ║');
+  console.log('╚════════════════════════════════════════════╝');
+  console.log(`\n🚀  http://localhost:${PORT}`);
+  console.log('📡  STT  →  Deepgram nova-3');
+  console.log('🧠  LLM  →  Gemini 3.5 Flash Lite');
+  console.log('🔊  TTS  →  Cartesia sonic-3.5');
+  console.log('📊  BILAN→  Gemini 3.1 Pro Preview');
+  console.log('🗄️   BDD  →  Supabase');
+  console.log('\n─────────────────────────────────────────────\n');
 });
