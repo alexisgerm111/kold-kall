@@ -459,23 +459,8 @@ async function endSimulation() {
       throw new Error(endData.error || 'Erreur clôture simulation');
     }
 
-    // Bilan
-    const bilanRes = await fetch('/api/bilan', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        simulationId: simId,
-        transcription: fullTranscription
-      })
-    });
-
-    const bilan = await bilanRes.json();
-
-    if (!bilanRes.ok) {
-      throw new Error(bilan.error || 'Erreur génération bilan');
-    }
-
-    showBilan(bilan);
+    // Redirection immédiate vers le dashboard — sans attendre le bilan
+    window.location.href = 'https://alexisgerm111.github.io/daqhboard-kold-kall/';
 
   } catch (err) {
     console.error('[Simulation] Erreur fin :', err.message);
@@ -496,11 +481,8 @@ function showBilan(bilan) {
   btnMic.disabled = false;
 }
 
-function closeBilan() {
-  bilanModal.classList.add('hidden');
-  // Point 2 — Retour au dashboard
-  window.location.href = 'https://alexisgerm111.github.io/daqhboard-kold-kall/';
-}
+function closeBilan() { bilanModal.classList.add('hidden'); }
+
 
 function resetSimulation() {
   closeBilan();
@@ -910,15 +892,13 @@ function closeModal() {
 
 // ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // init() est synchrone — tous les event listeners sont attachés avant la suite
-  init();
+  init(); // synchrone — tous les event listeners sont attachés avant la suite
 
-  // Point 1 — Si un token Supabase est passé depuis le dashboard, bypasser le login
+  // Bypass login si token Supabase passé depuis le dashboard
   const params = new URLSearchParams(window.location.search);
   const token  = params.get('token');
   if (!token) return;
 
-  // Nettoyer l'URL immédiatement pour ne pas laisser le token visible
   window.history.replaceState({}, '', window.location.pathname);
 
   fetch('/api/auth/login-token', {
@@ -933,7 +913,6 @@ document.addEventListener('DOMContentLoaded', () => {
         currentProfile = data.profile;
         showApp();
       }
-      // Si invalide → l'écran de login reste visible, rien à faire
     })
     .catch(err => console.warn('[Auth] Erreur token URL :', err.message));
 });
