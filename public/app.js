@@ -243,45 +243,47 @@ function showApp() {
 // ════════════════════════════════════════════════════════════════════════════
 
 async function loadSimulationContext(simulationId) {
-  const res = await fetch(
-    `/api/simulation/context?simulationId=${encodeURIComponent(simulationId)}`,
-    {
-      headers: authAccessToken
-        ? { Authorization: `Bearer ${authAccessToken}` }
-        : {}
+  simulationReady = false;
+  btnMic.disabled = true;
+  statusLabel.textContent = 'Préparation du scénario...';
+
+  for (let attempt = 0; attempt < 90; attempt++) {
+    const res = await fetch(
+      `/api/simulation/context?simulationId=${encodeURIComponent(simulationId)}`,
+      { headers: authAccessToken ? { Authorization: `Bearer ${authAccessToken}` } : {} }
+    );
+    const data = await res.json();
+
+    if (res.status === 202) {
+      statusLabel.textContent = 'Préparation du scénario...';
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      continue;
     }
-  );
+    if (!res.ok) throw new Error(data.error || 'Impossible de charger la simulation');
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Impossible de charger la simulation');
+    currentSimulationId = data.simulation.id;
+    currentSimulationConfig = data.simulation;
+    simulationReady = true;
+    simulationStartTime = null;
+    fullTranscription = [];
+    finalUtteranceParts = [];
+    interimUtterance = '';
 
-  currentSimulationId = data.simulation.id;
-  currentSimulationConfig = data.simulation;
-  simulationReady = true;
-  simulationStartTime = null;
-  fullTranscription = [];
-  finalUtteranceParts = [];
-  interimUtterance = '';
+    conversation.innerHTML = '';
+    if (convEmpty) {
+      conversation.appendChild(convEmpty);
+      convEmpty.style.display = '';
+    }
 
-  conversation.innerHTML = '';
-  if (convEmpty) {
-    conversation.appendChild(convEmpty);
-    convEmpty.style.display = '';
+    btnMic.disabled = false;
+    const phaseLabel = data.simulation.type_entretien === 'cold_call'
+      ? 'Cold Call'
+      : ({ complet:'Entretien complet', decouverte:'Découverte', demo:'Démo', objections_closing:'Objections & Closing', nego:'Négociation' }[data.simulation.phase_choisie] || 'Rendez-vous');
+    statusLabel.textContent = `${phaseLabel} — prêt à commencer`;
+    return;
   }
 
-  btnMic.disabled = false;
-
-  const phaseLabel = data.simulation.type_entretien === 'cold_call'
-    ? 'Cold Call'
-    : ({
-        complet: 'Entretien complet',
-        decouverte: 'Découverte',
-        demo: 'Démo',
-        objections_closing: 'Objections & Closing',
-        nego: 'Négociation'
-      }[data.simulation.phase_choisie] || 'Rendez-vous');
-
-  statusLabel.textContent = `${phaseLabel} — prêt à commencer`;
+  throw new Error('La préparation du scénario prend trop de temps. Réessaie depuis le dashboard.');
 }
 
 // ════════════════════════════════════════════════════════════════════════════
