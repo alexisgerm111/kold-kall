@@ -70,6 +70,8 @@ const supabaseAdmin = createClient(
   }
 );
 
+const preparingSimulationIds = new Set();
+
 // ════════════════════════════════════════════════════════════════════════════
 //  HELPERS
 // ════════════════════════════════════════════════════════════════════════════
@@ -162,6 +164,117 @@ async function callGemini(model, prompt, { maxOutputTokens = 4000, temperature =
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   if (!text.trim()) throw new Error(`Gemini ${model} n'a retourné aucun contenu`);
   return text;
+}
+
+
+const URL_ANALYSIS_SCHEMA = {
+  type: 'object',
+  properties: {
+    type_entreprise: { type: 'string' },
+    produit_service: { type: 'string' },
+    faits_publics: { type: 'array', items: { type: 'string' } }
+  },
+  required: ['type_entreprise', 'produit_service', 'faits_publics']
+};
+
+const PERSONA_SCHEMA = {
+  type: 'object',
+  properties: {
+    PERSONA_COMPLETE: {
+      type: 'object',
+      properties: {
+        identite: { type: 'object' }, role_ou_profil: { type: 'string' }, contexte: { type: 'string' },
+        faits_observables: { type: 'array', items: { type: 'string' } },
+        hypotheses_scenario: { type: 'array', items: { type: 'string' } },
+        situation_actuelle: { type: 'string' }, enjeux: { type: 'array', items: { type: 'string' } },
+        probleme_principal: { type: 'string' }, problemes_secondaires: { type: 'array', items: { type: 'string' } },
+        objectifs: { type: 'array', items: { type: 'string' } }, contraintes: { type: 'array', items: { type: 'string' } },
+        motivations: { type: 'array', items: { type: 'string' } }, priorites: { type: 'array', items: { type: 'string' } },
+        objections_potentielles: { type: 'array', items: { type: 'string' } }, criteres_decision: { type: 'array', items: { type: 'string' } },
+        niveau_urgence: { type: 'number' }, niveau_ouverture_initiale: { type: 'number' }, attitude_initiale: { type: 'string' },
+        niveau_confiance_initial: { type: 'number' }, informations_connues: { type: 'array', items: { type: 'string' } },
+        informations_inconnues: { type: 'array', items: { type: 'string' } }, informations_revelables: { type: 'array', items: { type: 'string' } },
+        reactions_probables: { type: 'object' }, memoire_simulation_precedente: { type: 'object' }, point_de_depart_conversation: { type: 'string' }
+      },
+      required: ['identite','role_ou_profil','contexte','faits_observables','hypotheses_scenario','situation_actuelle','enjeux','probleme_principal','problemes_secondaires','objectifs','contraintes','motivations','priorites','objections_potentielles','criteres_decision','niveau_urgence','niveau_ouverture_initiale','attitude_initiale','niveau_confiance_initial','informations_connues','informations_inconnues','informations_revelables','reactions_probables','memoire_simulation_precedente','point_de_depart_conversation']
+    },
+    PROSPECT_VISIBLE_CONTEXT: {
+      type: 'object',
+      properties: {
+        identite: { type: 'object' }, role_ou_profil: { type: 'string' }, contexte: { type: 'string' },
+        informations_connues_au_demarrage: { type: 'array', items: { type: 'string' } }, situation: { type: 'string' },
+        objectifs_connus: { type: 'array', items: { type: 'string' } }, attitude_initiale: { type: 'string' },
+        niveau_ouverture: { type: 'number' }, niveau_confiance: { type: 'number' },
+        memoire_des_echanges_precedents: { type: 'array', items: { type: 'string' } },
+        seller_known: { type: 'boolean' }, seller_company_known: { type: 'boolean' }, seller_product_known: { type: 'boolean' }, call_reason_known: { type: 'boolean' }
+      },
+      required: ['identite','role_ou_profil','contexte','informations_connues_au_demarrage','situation','objectifs_connus','attitude_initiale','niveau_ouverture','niveau_confiance','memoire_des_echanges_precedents','seller_known','seller_company_known','seller_product_known','call_reason_known']
+    }
+  },
+  required: ['PERSONA_COMPLETE', 'PROSPECT_VISIBLE_CONTEXT']
+};
+
+const BILAN_SCHEMA = {
+  type: 'object',
+  properties: {
+    comportements_naturels: { type: 'array', items: { type: 'object', properties: {
+      horodatage_secondes: { type: 'number' }, description: { type: 'string' },
+      frameworks_associes: { type: 'array', items: { type: 'string' } }, niveau_certitude: { type: 'number' }, principe_nomme: { type: 'string' }
+    }, required: ['horodatage_secondes','description','frameworks_associes','niveau_certitude','principe_nomme'] } },
+    ecarts: { type: 'array', items: { type: 'object', properties: {
+      horodatage_secondes: { type: 'number' }, type: { type: 'string', enum: ['adaptatif','instinctif','manquant'] }, description: { type: 'string' },
+      effet_avant: { type: 'string' }, effet_apres: { type: 'string' }, framework_de_reference: { type: 'string' }
+    }, required: ['horodatage_secondes','type','description','effet_avant','effet_apres','framework_de_reference'] } },
+    moments_bascule: { type: 'array', items: { type: 'object', properties: {
+      horodatage_secondes: { type: 'number' }, declencheur: { type: 'string' }, description: { type: 'string' }
+    }, required: ['horodatage_secondes','declencheur','description'] } },
+    coherence_interne: { type: 'object', properties: {
+      comportements_ancres: { type: 'array', items: { type: 'string' } }, comportements_situationnels: { type: 'array', items: { type: 'string' } }, incoherences: { type: 'array', items: { type: 'string' } }
+    }, required: ['comportements_ancres','comportements_situationnels','incoherences'] },
+    distribution_tactique: { type: 'object', properties: {
+      questions: { type: 'number' }, crac: { type: 'number' }, storytelling: { type: 'number' }, reframe: { type: 'number' }, autres: { type: 'number' }
+    }, required: ['questions','crac','storytelling','reframe','autres'] },
+    attribution_multi_framework: { type: 'array', items: { type: 'object', properties: {
+      comportement: { type: 'string' }, frameworks: { type: 'array', items: { type: 'string' } }, interpretation: { type: 'string' }
+    }, required: ['comportement','frameworks','interpretation'] } },
+    tagline: { type: 'string' }, note_globale: { type: 'number' }
+  },
+  required: ['comportements_naturels','ecarts','moments_bascule','coherence_interne','distribution_tactique','attribution_multi_framework','tagline','note_globale']
+};
+
+async function callGeminiStructured(model, prompt, schema, { maxOutputTokens = 4000, temperature = 0.2 } = {}) {
+  console.log(`[Gemini] → ${model} | structured JSON`);
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          maxOutputTokens,
+          temperature,
+          responseFormat: { text: { mimeType: 'application/json', schema } }
+        }
+      })
+    }
+  );
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error(`[Gemini] ${model} HTTP ${response.status}: ${errText.slice(0, 1500)}`);
+    throw new Error(`Gemini ${model} ${response.status}: ${errText}`);
+  }
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  if (!text.trim()) {
+    console.error(`[Gemini] ${model} réponse vide :`, JSON.stringify(data).slice(0, 1500));
+    throw new Error(`Gemini ${model} n'a retourné aucun contenu`);
+  }
+  try { return JSON.parse(text); }
+  catch (error) {
+    console.error(`[Gemini] ${model} JSON invalide malgré structured output :`, text.slice(0, 1500));
+    throw new Error(`Réponse Gemini JSON invalide : ${error.message}`);
+  }
 }
 
 function wordCount(text) {
@@ -466,7 +579,11 @@ async function fetchPublicPageText(rawUrl) {
       response = await fetch(currentUrl, {
         redirect: 'manual',
         signal: controller.signal,
-        headers: { 'User-Agent': 'Kold-Kall/1.0' }
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
+        }
       });
     } finally {
       clearTimeout(timeout);
@@ -481,7 +598,7 @@ async function fetchPublicPageText(rawUrl) {
 
     if (!response.ok) throw new Error(`Le site a répondu HTTP ${response.status}`);
     const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('text/html')) throw new Error('L URL fournie ne pointe pas vers une page HTML');
+    if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) throw new Error('L URL fournie ne pointe pas vers une page HTML');
 
     const html = await response.text();
     const clean = html
@@ -522,8 +639,8 @@ Réponds uniquement en JSON strict :
   "faits_publics": []
 }
 `;
-  const raw = await callGemini('gemini-3.1-pro-preview', prompt, { maxOutputTokens: 1500, temperature: 0.1 });
-  const result = parseGeminiJson(raw);
+  console.log(`[URL] Analyse Gemini → ${cible} | ${page.url} | ${page.texte.length} caractères`);
+  const result = await callGeminiStructured('gemini-3.1-pro-preview', prompt, URL_ANALYSIS_SCHEMA, { maxOutputTokens: 1500, temperature: 0.1 });
   return {
     type_entreprise: result.type_entreprise || result.type_entreprise_prospect || '',
     produit_service: result.produit_service || '',
@@ -634,8 +751,7 @@ Réponds uniquement avec ce JSON :
 }
 `;
 
-  const raw = await callGemini('gemini-3.1-pro-preview', prompt, { maxOutputTokens: 6000, temperature: 0.25 });
-  const result = parseGeminiJson(raw);
+  const result = await callGeminiStructured('gemini-3.1-pro-preview', prompt, PERSONA_SCHEMA, { maxOutputTokens: 6000, temperature: 0.25 });
   if (!result.PERSONA_COMPLETE || !result.PROSPECT_VISIBLE_CONTEXT) {
     throw new Error('Gemini n a pas retourné les deux niveaux de contexte');
   }
@@ -797,129 +913,162 @@ app.post('/api/analyze-url', async (req, res) => {
 //  SIMULATION
 // ════════════════════════════════════════════════════════════════════════════
 
+function buildSimulationContextFromRow(simulation) {
+  return {
+    b2b_b2c: simulation.b2b_b2c,
+    type_entretien: simulation.type_entretien,
+    phase_choisie: simulation.phase_choisie,
+    vendeur: {
+      type_entreprise: simulation.vendeur_type_entreprise || '',
+      produit: simulation.vendeur_produit || '',
+      url: simulation.vendeur_url || ''
+    },
+    prospect: {
+      role: simulation.b2b_b2c === 'b2b' ? simulation.prospect_role || '' : null,
+      type_entreprise: simulation.b2b_b2c === 'b2b' ? simulation.prospect_type_entreprise || '' : null,
+      url: simulation.b2b_b2c === 'b2b' ? simulation.prospect_url || '' : null,
+      profile: simulation.b2b_b2c === 'b2c' ? simulation.prospect_profile || '' : null
+    },
+    simulation_precedente_id: simulation.simulation_precedente_id,
+    continuite_rdv: simulation.continuite_rdv
+  };
+}
+
+async function prepareSimulationById(simulationId) {
+  if (preparingSimulationIds.has(simulationId)) return;
+  preparingSimulationIds.add(simulationId);
+
+  try {
+    const { data: simulation, error: simulationError } = await supabaseAdmin
+      .from('simulations').select('*').eq('id', simulationId).single();
+    if (simulationError || !simulation) throw new Error('Simulation introuvable pendant la préparation');
+    if (simulation.statut !== 'preparation' || simulation.persona_complete) return;
+
+    let workingSimulation = simulation;
+    const enrichment = {};
+
+    if (workingSimulation.vendeur_url && (!workingSimulation.vendeur_type_entreprise || !workingSimulation.vendeur_produit)) {
+      console.log(`[URL] Enrichissement vendeur en arrière-plan : ${workingSimulation.vendeur_url}`);
+      const seller = await analyzePublicUrl(workingSimulation.vendeur_url, 'vendeur', { b2b_b2c: workingSimulation.b2b_b2c });
+      if (!workingSimulation.vendeur_type_entreprise && seller.type_entreprise) enrichment.vendeur_type_entreprise = seller.type_entreprise;
+      if (!workingSimulation.vendeur_produit && seller.produit_service) enrichment.vendeur_produit = seller.produit_service;
+    }
+
+    if (workingSimulation.b2b_b2c === 'b2b' && workingSimulation.prospect_url && !workingSimulation.prospect_type_entreprise) {
+      console.log(`[URL] Enrichissement prospect en arrière-plan : ${workingSimulation.prospect_url}`);
+      const prospect = await analyzePublicUrl(workingSimulation.prospect_url, 'prospect', { b2b_b2c: workingSimulation.b2b_b2c, prospect_role: workingSimulation.prospect_role });
+      if (prospect.type_entreprise_prospect) enrichment.prospect_type_entreprise = prospect.type_entreprise_prospect;
+    }
+
+    if (Object.keys(enrichment).length) {
+      const { data: updated, error: updateError } = await supabaseAdmin
+        .from('simulations').update(enrichment).eq('id', simulationId).select('*').single();
+      if (updateError) throw updateError;
+      workingSimulation = updated;
+    }
+
+    let previousSimulation = null;
+    let previousTranscriptions = [];
+    if (workingSimulation.simulation_precedente_id) {
+      const { data: previous, error: previousError } = await supabaseAdmin
+        .from('simulations').select('*').eq('id', workingSimulation.simulation_precedente_id).single();
+      if (previousError || !previous) throw new Error('Simulation précédente introuvable pendant la préparation');
+
+      const { data: previousRows, error: previousRowsError } = await supabaseAdmin
+        .from('transcriptions').select('locuteur, texte, horodatage_secondes')
+        .eq('simulation_id', previous.id).order('horodatage_secondes', { ascending: true });
+      if (previousRowsError) throw previousRowsError;
+      previousSimulation = previous;
+      previousTranscriptions = previousRows || [];
+    }
+
+    const { persona_complete, prospect_visible_context } = await buildSimulationPersona({
+      simulationContext: buildSimulationContextFromRow(workingSimulation),
+      previousSimulation,
+      previousTranscriptions
+    });
+
+    const { error: readyError } = await supabaseAdmin
+      .from('simulations')
+      .update({ persona_complete, prospect_visible_context, statut: 'en_cours' })
+      .eq('id', simulationId)
+      .eq('statut', 'preparation');
+    if (readyError) throw readyError;
+
+    console.log(`[Supabase] ✅ Persona prête : ${simulationId}`);
+  } catch (err) {
+    console.error(`[Simulation] ❌ Préparation ${simulationId} :`, err.stack || err.message);
+    await supabaseAdmin.from('simulations').update({ statut: 'erreur_preparation' }).eq('id', simulationId).eq('statut', 'preparation');
+  } finally {
+    preparingSimulationIds.delete(simulationId);
+  }
+}
+
+function ensureSimulationPreparation(simulationId) { void prepareSimulationById(simulationId); }
+
 app.post('/api/simulation/start', async (req, res) => {
   const user = await getAuthenticatedUser(req);
   if (!user) return res.status(401).json({ error: 'Authentification requise' });
 
   const {
-    b2b_b2c,
-    vendeur_type_entreprise,
-    vendeur_produit,
-    vendeur_url,
-    prospect_role,
-    prospect_type_entreprise,
-    prospect_url,
-    prospect_profile,
-    type_entretien,
-    phase_choisie = null,
-    simulation_precedente_id = null,
-    continuite_rdv = null
+    b2b_b2c, vendeur_type_entreprise, vendeur_produit, vendeur_url,
+    prospect_role, prospect_type_entreprise, prospect_url, prospect_profile,
+    type_entretien, phase_choisie = null, simulation_precedente_id = null, continuite_rdv = null
   } = req.body;
 
   if (!['b2b', 'b2c'].includes(b2b_b2c)) return res.status(400).json({ error: 'b2b_b2c invalide' });
   if (!['cold_call', 'rdv'].includes(type_entretien)) return res.status(400).json({ error: 'type_entretien invalide' });
-
-  if (type_entretien === 'rdv' && !['complet', 'decouverte', 'demo', 'objections_closing', 'nego'].includes(phase_choisie)) {
-    return res.status(400).json({ error: 'phase_choisie invalide' });
-  }
-  if (type_entretien === 'cold_call' && phase_choisie) {
-    return res.status(400).json({ error: 'Un Cold Call ne possède pas de phase supplémentaire' });
-  }
+  if (type_entretien === 'rdv' && !['complet','decouverte','demo','objections_closing','nego'].includes(phase_choisie)) return res.status(400).json({ error: 'phase_choisie invalide' });
+  if (type_entretien === 'cold_call' && phase_choisie) return res.status(400).json({ error: 'Un Cold Call ne possède pas de phase supplémentaire' });
 
   let previousSimulation = null;
   let previousTranscriptions = [];
-
   if (simulation_precedente_id) {
-    const { data: previous, error } = await supabaseAdmin
-      .from('simulations')
-      .select('*')
-      .eq('id', simulation_precedente_id)
-      .single();
-
-    if (error || !previous) return res.status(400).json({ error: 'Simulation précédente introuvable' });
-    if (previous.user_id !== user.id) return res.status(403).json({ error: 'La simulation précédente n appartient pas à cet utilisateur' });
+    const { data: previous, error: previousError } = await supabaseAdmin
+      .from('simulations').select('*').eq('id', simulation_precedente_id).single();
+    if (previousError || !previous) return res.status(400).json({ error: 'Simulation précédente introuvable' });
+    if (previous.user_id !== user.id) return res.status(403).json({ error: "La simulation précédente n'appartient pas à cet utilisateur" });
     if (previous.statut !== 'terminee') return res.status(400).json({ error: 'La simulation précédente doit être terminée' });
     if (previous.b2b_b2c && previous.b2b_b2c !== b2b_b2c) return res.status(400).json({ error: 'Le type B2B/B2C doit rester identique pour une continuation' });
 
-    const { data: previousRows } = await supabaseAdmin
-      .from('transcriptions')
-      .select('locuteur, texte, horodatage_secondes')
-      .eq('simulation_id', previous.id)
-      .order('horodatage_secondes', { ascending: true });
-
+    const { data: previousRows, error: previousRowsError } = await supabaseAdmin
+      .from('transcriptions').select('locuteur, texte, horodatage_secondes')
+      .eq('simulation_id', previous.id).order('horodatage_secondes', { ascending: true });
+    if (previousRowsError) return res.status(500).json({ error: previousRowsError.message });
     previousSimulation = previous;
     previousTranscriptions = previousRows || [];
 
-    if (type_entretien !== 'rdv' || !isValidPhaseTransition(previous, phase_choisie, previousTranscriptions)) {
-      return res.status(400).json({ error: 'Transition commerciale incompatible' });
-    }
-
+    if (type_entretien !== 'rdv' || !isValidPhaseTransition(previous, phase_choisie, previousTranscriptions)) return res.status(400).json({ error: 'Transition commerciale incompatible' });
     if (previous.type_entretien === 'cold_call') {
-      if (continuite_rdv && continuite_rdv !== 'nouveau_rdv') {
-        return res.status(400).json({ error: 'Cette continuation doit être un nouveau rendez-vous' });
-      }
-    } else if (continuite_rdv && !['meme_rdv', 'nouveau_rdv'].includes(continuite_rdv)) {
+      if (continuite_rdv && continuite_rdv !== 'nouveau_rdv') return res.status(400).json({ error: 'Cette continuation doit être un nouveau rendez-vous' });
+    } else if (continuite_rdv && !['meme_rdv','nouveau_rdv'].includes(continuite_rdv)) {
       return res.status(400).json({ error: 'continuite_rdv invalide' });
     }
   }
 
-  const simulationContext = {
-    b2b_b2c,
-    type_entretien,
-    phase_choisie,
-    vendeur: {
-      type_entreprise: vendeur_type_entreprise || '',
-      produit: vendeur_produit || '',
-      url: vendeur_url || ''
-    },
-    prospect: {
-      role: b2b_b2c === 'b2b' ? prospect_role || '' : null,
-      type_entreprise: b2b_b2c === 'b2b' ? prospect_type_entreprise || '' : null,
-      url: b2b_b2c === 'b2b' ? prospect_url || '' : null,
-      profile: b2b_b2c === 'b2c' ? prospect_profile || '' : null
-    },
-    simulation_precedente_id,
-    continuite_rdv
-  };
-
   try {
-    const { persona_complete, prospect_visible_context } = await buildSimulationPersona({
-      simulationContext,
-      previousSimulation,
-      previousTranscriptions
-    });
-
-    const { data, error } = await supabaseAdmin
-      .from('simulations')
-      .insert({
-        user_id: user.id,
-        type_scenario: type_entretien === 'cold_call' ? 'cold_call' : phase_choisie,
-        niveau_difficulte: 'moyen',
-        mode_jeu: 'entrainement',
-        statut: 'en_cours',
-        type_entretien,
-        phase_choisie,
-        b2b_b2c,
-        vendeur_type_entreprise: vendeur_type_entreprise || null,
-        vendeur_produit: vendeur_produit || null,
-        vendeur_url: vendeur_url || null,
-        prospect_role: b2b_b2c === 'b2b' ? prospect_role || null : null,
-        prospect_type_entreprise: b2b_b2c === 'b2b' ? prospect_type_entreprise || null : null,
-        prospect_url: b2b_b2c === 'b2b' ? prospect_url || null : null,
-        prospect_profile: b2b_b2c === 'b2c' ? prospect_profile || null : null,
-        simulation_precedente_id: simulation_precedente_id || null,
-        continuite_rdv: continuite_rdv || null,
-        persona_complete,
-        prospect_visible_context
-      })
-      .select('id')
-      .single();
+    const { data, error } = await supabaseAdmin.from('simulations').insert({
+      user_id: user.id,
+      type_scenario: type_entretien === 'cold_call' ? 'cold_call' : phase_choisie,
+      niveau_difficulte: 'moyen', mode_jeu: 'entrainement', statut: 'preparation',
+      type_entretien, phase_choisie, b2b_b2c,
+      vendeur_type_entreprise: vendeur_type_entreprise?.trim() || null,
+      vendeur_produit: vendeur_produit?.trim() || null,
+      vendeur_url: vendeur_url?.trim() || null,
+      prospect_role: b2b_b2c === 'b2b' ? prospect_role || null : null,
+      prospect_type_entreprise: b2b_b2c === 'b2b' ? prospect_type_entreprise?.trim() || null : null,
+      prospect_url: b2b_b2c === 'b2b' ? prospect_url?.trim() || null : null,
+      prospect_profile: b2b_b2c === 'b2c' ? prospect_profile?.trim() || null : null,
+      simulation_precedente_id: simulation_precedente_id || null,
+      continuite_rdv: continuite_rdv || null
+    }).select('id').single();
 
     if (error) throw error;
-    console.log(`[Supabase] ✅ Simulation créée : ${data.id}`);
-    res.json({ simulationId: data.id });
+    console.log(`[Supabase] ✅ Simulation créée immédiatement : ${data.id}`);
+    res.json({ simulationId: data.id, status: 'preparation' });
+    ensureSimulationPreparation(data.id);
   } catch (err) {
-    console.error('[Simulation] Erreur création :', err.message);
+    console.error('[Simulation] Erreur création :', err.stack || err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -930,9 +1079,16 @@ app.get('/api/simulation/context', async (req, res) => {
 
   const authorized = await getAuthorizedSimulation(req, simulationId);
   if (authorized.error) return res.status(authorized.error.status).json({ error: authorized.error.message });
-
   const { simulation } = authorized;
+
+  if (simulation.statut === 'erreur_preparation') return res.status(500).json({ error: 'La préparation du scénario a échoué. Consulte les logs Render pour le détail.' });
+  if (simulation.statut === 'preparation' || !simulation.prospect_visible_context || !simulation.persona_complete) {
+    ensureSimulationPreparation(simulationId);
+    return res.status(202).json({ ready: false, status: 'preparation' });
+  }
+
   res.json({
+    ready: true,
     simulation: {
       id: simulation.id,
       type_entretien: simulation.type_entretien,
@@ -941,7 +1097,7 @@ app.get('/api/simulation/context', async (req, res) => {
       continuite_rdv: simulation.continuite_rdv,
       type_scenario: simulation.type_scenario
     },
-    prospect_visible_context: simulation.prospect_visible_context || {}
+    prospect_visible_context: simulation.prospect_visible_context
   });
 });
 
@@ -1241,8 +1397,7 @@ RÈGLES IMPÉRATIVES :
 12. Ne jamais attribuer un framework uniquement sur un mot-clé.
 `;
 
-    const raw = await callGemini('gemini-3.1-pro-preview', prompt, { maxOutputTokens: 7000, temperature: 0.2 });
-    const analyse = parseGeminiJson(raw);
+    const analyse = await callGeminiStructured('gemini-3.1-pro-preview', prompt, BILAN_SCHEMA, { maxOutputTokens: 7000, temperature: 0.2 });
 
     const note = Math.max(0, Math.min(100, Number(analyse.note_globale) || 0));
     analyse.note_globale = note;
@@ -1301,6 +1456,9 @@ app.post('/api/chat', async (req, res) => {
   if (authorized.error) return res.status(authorized.error.status).json({ error: authorized.error.message });
 
   const { simulation } = authorized;
+  if (simulation.statut !== 'en_cours' || !simulation.persona_complete || !simulation.prospect_visible_context) {
+    return res.status(409).json({ error: 'Simulation encore en préparation' });
+  }
 
   try {
     const { data: previousRows, error: historyError } = await supabaseAdmin
@@ -1347,7 +1505,7 @@ Ne récite jamais le problème supposé du produit.
         body: JSON.stringify({
           contents,
           systemInstruction: { parts: [{ text: systemPrompt }] },
-          generationConfig: { maxOutputTokens: 300, temperature: 0.7 }
+          generationConfig: { maxOutputTokens: 300 }
         })
       }
     );
