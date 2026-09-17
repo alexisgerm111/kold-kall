@@ -1,169 +1,115 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  KOLD KALL V0 — Logique Frontend
-//  Auth complète : login, signup, mot de passe oublié, œil MDP
+//  KOLD KALL V1 — Logique Frontend
+//  Auth : login, signup, mot de passe oublié
 //  Pipeline : Deepgram → Gemini 3.5 Flash Lite → Cartesia
-//  Simulation : enregistrement Supabase + bilan Gemini 3.1 Pro Preview
+//  Configuration et contexte : serveur / Supabase
 // ════════════════════════════════════════════════════════════════════════════
 
 'use strict';
 
-// ─── PERSONAS ────────────────────────────────────────────────────────────────
-const PERSONAS = [
-  {
-    id         : 'prospect_direct',
-    name       : 'Prospect Direct',
-    description: 'Décideur à appeler directement',
-    color      : '#2563EB',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
-    systemPrompt: `Tu joues le rôle d'un prospect (décideur en entreprise) qui reçoit un appel téléphonique commercial à froid. Tu parles en français de façon naturelle. Tu peux être poli mais occupé, légèrement méfiant, parfois intéressé si le commercial est convaincant. Tu poses des objections réalistes (pas le temps, déjà un prestataire, prix...). Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Reste réaliste, pas caricatural. Pas de listes ni de markdown.`
-  },
-  {
-    id         : 'barrage_secretaire',
-    name       : 'Secrétaire Barrage',
-    description: 'Brigitte — filtre les appels',
-    color      : '#DC2626',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>`,
-    systemPrompt: `Tu joues le rôle de Brigitte, secrétaire de direction qui filtre les appels commerciaux pour protéger son patron. Tu parles en français de façon professionnelle mais ferme. Tu demandes systématiquement l'objet de l'appel, tu interroges sur la relation avec le patron, tu peux dire qu'il est en réunion. Si le commercial est vraiment habile et convaincant, tu peux éventuellement passer l'appel. Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Pas de listes ni de markdown.`
-  },
-  {
-    id         : 'client_difficile',
-    name       : 'Client Difficile',
-    description: 'Sceptique et exigeant',
-    color      : '#D97706',
-    iconSvg    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
-    systemPrompt: `Tu joues le rôle d'un prospect sceptique et exigeant pour entraîner des commerciaux. Tu parles en français de façon directe et parfois abrupte. Tu poses des objections sur le prix, tu compares avec la concurrence, tu demandes des preuves concrètes. Règle absolue : tes réponses font TOUJOURS 1 à 3 phrases maximum. Tu restes réaliste, pas caricatural. Pas de listes ni de markdown.`
-  }
-];
-
-// ─── ÉTAT GLOBAL ──────────────────────────────────────────────────────────────
+// ─── ÉTAT GLOBAL ─────────────────────────────────────────────────────────────
 const State = Object.freeze({
-  IDLE     : 'idle',
+  IDLE: 'idle',
   LISTENING: 'listening',
-  THINKING : 'thinking',
-  SPEAKING : 'speaking',
-  ERROR    : 'error'
+  THINKING: 'thinking',
+  SPEAKING: 'speaking',
+  ERROR: 'error'
 });
 
-let currentState        = State.IDLE;
-let currentPersonaId    = 'prospect_direct';
-let conversationHistory = [];
-let isProcessing        = false;
+let currentState = State.IDLE;
+let isProcessing = false;
 
 // Session
-let currentUser         = null;
-let currentProfile      = null;
+let currentUser = null;
+let currentProfile = null;
+let authAccessToken = null;
 let currentSimulationId = null;
+let currentSimulationConfig = null;
+let simulationReady = false;
 let simulationStartTime = null;
-let fullTranscription   = [];
+let fullTranscription = [];
 
 // Audio/réseau
-let deepgramSocket  = null;
-let mediaRecorder   = null;
-let audioStream     = null;
-let keepAliveTimer  = null;
-let audioCtx        = null;
-let analyserNode    = null;
-let vizFrame        = null;
+let deepgramSocket = null;
+let mediaRecorder = null;
+let audioStream = null;
+let keepAliveTimer = null;
+let audioCtx = null;
+let analyserNode = null;
+let vizFrame = null;
 
 // Enregistrement complet de la simulation
-let simulationRecorder   = null;
-let recordedAudioChunks  = [];
+let simulationRecorder = null;
+let recordedAudioChunks = [];
 let recordingDestination = null;
+let microphoneSource = null;
 
 // Agrégation des segments Deepgram
-let finalUtteranceParts  = [];
+let finalUtteranceParts = [];
+let interimUtterance = '';
 
 // ─── DOM ──────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
-// Écrans
-const loginScreen    = $('login-screen');
-const appScreen      = $('app-screen');
+const loginScreen = $('login-screen');
+const appScreen = $('app-screen');
 
-// Login
-const loginForm      = $('login-form');
-const loginEmail     = $('login-email');
-const loginPassword  = $('login-password');
-const loginBtn       = $('login-btn');
-const loginError     = $('login-error');
+const loginForm = $('login-form');
+const loginEmail = $('login-email');
+const loginPassword = $('login-password');
+const loginBtn = $('login-btn');
+const loginError = $('login-error');
 const toggleEyeLogin = $('toggle-eye-login');
-const btnShowSignup  = $('btn-show-signup');
-const btnForgot      = $('btn-forgot');
+const btnShowSignup = $('btn-show-signup');
+const btnForgot = $('btn-forgot');
 
-// Signup
-const signupPanel    = $('signup-panel');
-const signupNom      = $('signup-nom');
-const signupPrenom   = $('signup-prenom');
-const signupEmail    = $('signup-email');
+const signupPanel = $('signup-panel');
+const signupNom = $('signup-nom');
+const signupPrenom = $('signup-prenom');
+const signupEmail = $('signup-email');
 const signupPassword = $('signup-password');
-const signupBtn      = $('signup-btn');
-const signupError    = $('signup-error');
-const signupSuccess  = $('signup-success');
-const toggleEyeSignup= $('toggle-eye-signup');
-const btnShowLogin   = $('btn-show-login');
+const signupBtn = $('signup-btn');
+const signupError = $('signup-error');
+const signupSuccess = $('signup-success');
+const toggleEyeSignup = $('toggle-eye-signup');
+const btnShowLogin = $('btn-show-login');
 
-// App
-const userNameEl     = $('user-name');
-const orbContainer   = $('orb-container');
-const statusLabel    = $('status-label');
+const userNameEl = $('user-name');
+const orbContainer = $('orb-container');
+const statusLabel = $('status-label');
 const transcriptLive = $('transcript-live');
-const conversation   = $('conversation');
-const convEmpty      = $('conv-empty');
-const btnMic         = $('btn-mic');
-const btnMicLabel    = $('btn-mic-label');
-const btnEnd         = $('btn-end');
-const btnPersona     = $('btn-persona');
-const personaBadge   = $('persona-badge');
-const modalOverlay   = $('modal-overlay');
-const btnSheetClose  = $('btn-sheet-close');
-const personaGrid    = $('persona-grid');
-const audioViz       = $('audio-viz');
+const conversation = $('conversation');
+const convEmpty = $('conv-empty');
+const btnMic = $('btn-mic');
+const btnMicLabel = $('btn-mic-label');
+const btnEnd = $('btn-end');
+const audioViz = $('audio-viz');
 
-// Bilan
-const bilanModal     = $('bilan-modal');
-const bilanNote      = $('bilan-note');
-const bilanPositifs  = $('bilan-positifs');
-const bilanNegatifs  = $('bilan-negatifs');
-const bilanConseils  = $('bilan-conseils');
-const btnBilanClose  = $('btn-bilan-close');
-const btnNewSim      = $('btn-new-simulation');
+const iconMic = $('icon-mic');
+const iconWave = $('icon-wave');
+const iconLoader = $('icon-loader');
+const iconSound = $('icon-sound');
+const iconError = $('icon-error');
 
-// Icônes orb
-const iconMic        = $('icon-mic');
-const iconWave       = $('icon-wave');
-const iconLoader     = $('icon-loader');
-const iconSound      = $('icon-sound');
-const iconError      = $('icon-error');
-
-// Icônes bouton mic
 const micIconDefault = $('mic-icon-default');
-const micIconStop    = $('mic-icon-stop');
+const micIconStop = $('mic-icon-stop');
 
 // ════════════════════════════════════════════════════════════════════════════
 //  INIT
 // ════════════════════════════════════════════════════════════════════════════
 
 function init() {
-  // Login
   loginForm.addEventListener('submit', handleLogin);
   toggleEyeLogin.addEventListener('click', () => togglePasswordVisibility(loginPassword, toggleEyeLogin));
   btnShowSignup.addEventListener('click', showSignupPanel);
   btnForgot.addEventListener('click', handleForgotPassword);
 
-  // Signup
   signupBtn.addEventListener('click', handleSignup);
   toggleEyeSignup.addEventListener('click', () => togglePasswordVisibility(signupPassword, toggleEyeSignup));
   btnShowLogin.addEventListener('click', showLoginPanel);
 
-  // App
   btnMic.addEventListener('click', handleMicClick);
   btnEnd.addEventListener('click', endSimulation);
-  btnBilanClose.addEventListener('click', closeBilan);
-  btnNewSim.addEventListener('click', resetSimulation);
-  btnPersona.addEventListener('click', openModal);
-  btnSheetClose.addEventListener('click', closeModal);
-  modalOverlay.addEventListener('click', e => { if (e.target === modalOverlay) closeModal(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -199,14 +145,19 @@ async function handleLogin(e) {
 
   try {
     const res = await fetch('/api/auth/login', {
-      method : 'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ email: loginEmail.value.trim(), password: loginPassword.value })
+      body: JSON.stringify({
+        email: loginEmail.value.trim(),
+        password: loginPassword.value
+      })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Erreur de connexion');
-    currentUser    = data.user;
+
+    currentUser = data.user;
     currentProfile = data.profile;
+    authAccessToken = data.session?.access_token || null;
     showApp();
   } catch (err) {
     loginError.textContent = err.message;
@@ -217,24 +168,24 @@ async function handleLogin(e) {
 }
 
 async function handleSignup() {
-  signupError.textContent   = '';
+  signupError.textContent = '';
   signupSuccess.textContent = '';
   signupBtn.disabled = true;
   signupBtn.textContent = 'Création...';
 
   try {
     const res = await fetch('/api/auth/signup', {
-      method : 'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        email   : signupEmail.value.trim(),
+      body: JSON.stringify({
+        email: signupEmail.value.trim(),
         password: signupPassword.value,
-        nom     : signupNom.value.trim(),
-        prenom  : signupPrenom.value.trim()
+        nom: signupNom.value.trim(),
+        prenom: signupPrenom.value.trim()
       })
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
+    if (!res.ok) throw new Error(data.error || 'Erreur de création');
     signupSuccess.textContent = '✅ Compte créé ! Vérifiez votre email puis connectez-vous.';
     setTimeout(showLoginPanel, 3000);
   } catch (err) {
@@ -251,15 +202,16 @@ async function handleForgotPassword() {
     loginError.textContent = 'Entrez votre email ci-dessus puis cliquez sur ce lien.';
     return;
   }
+
   loginError.textContent = '';
   try {
     const res = await fetch('/api/auth/reset-password', {
-      method : 'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ email })
+      body: JSON.stringify({ email })
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
+    if (!res.ok) throw new Error(data.error || 'Erreur');
     loginError.style.color = 'var(--success)';
     loginError.textContent = '✅ Email de réinitialisation envoyé.';
     setTimeout(() => {
@@ -276,176 +228,146 @@ function showApp() {
   appScreen.classList.remove('hidden');
   const prenom = currentProfile?.prenom || currentUser?.email?.split('@')[0] || 'Utilisateur';
   userNameEl.textContent = prenom;
-  renderPersonaGrid();
+
+  if (simulationReady) {
+    btnMic.disabled = false;
+  } else {
+    btnMic.disabled = true;
+    statusLabel.textContent = 'Lance une simulation depuis le dashboard.';
+  }
   setState(State.IDLE);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  SIMULATION
+//  CONTEXTE SIMULATION
+// ════════════════════════════════════════════════════════════════════════════
+
+async function loadSimulationContext(simulationId) {
+  const res = await fetch(
+    `/api/simulation/context?simulationId=${encodeURIComponent(simulationId)}`,
+    {
+      headers: authAccessToken
+        ? { Authorization: `Bearer ${authAccessToken}` }
+        : {}
+    }
+  );
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Impossible de charger la simulation');
+
+  currentSimulationId = data.simulation.id;
+  currentSimulationConfig = data.simulation;
+  simulationReady = true;
+  simulationStartTime = null;
+  fullTranscription = [];
+  finalUtteranceParts = [];
+  interimUtterance = '';
+
+  conversation.innerHTML = '';
+  if (convEmpty) {
+    conversation.appendChild(convEmpty);
+    convEmpty.style.display = '';
+  }
+
+  btnMic.disabled = false;
+
+  const phaseLabel = data.simulation.type_entretien === 'cold_call'
+    ? 'Cold Call'
+    : ({
+        complet: 'Entretien complet',
+        decouverte: 'Découverte',
+        demo: 'Démo',
+        objections_closing: 'Objections & Closing',
+        nego: 'Négociation'
+      }[data.simulation.phase_choisie] || 'Rendez-vous');
+
+  statusLabel.textContent = `${phaseLabel} — prêt à commencer`;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ENREGISTREMENT SIMULATION
 // ════════════════════════════════════════════════════════════════════════════
 
 async function startSimulation() {
-  if (!currentUser) return;
-  try {
-    const res = await fetch('/api/simulation/start', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        userId          : currentUser.id,
-        typeScenario    : currentPersonaId,
-        niveauDifficulte: 'moyen',
-        modeJeu         : 'entrainement'
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    currentSimulationId = data.simulationId;
-    simulationStartTime = Date.now();
-    fullTranscription   = [];
-btnEnd.classList.remove('hidden');
+  if (!currentUser || !currentSimulationId || !simulationReady) return;
 
-// Préparer l'enregistrement complet de la simulation
-recordedAudioChunks = [];
+  simulationStartTime = Date.now();
+  btnEnd.classList.remove('hidden');
+  recordedAudioChunks = [];
 
-if (!audioCtx || audioCtx.state === 'closed') {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-}
+  if (!audioCtx || audioCtx.state === 'closed') {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-if (audioCtx.state === 'suspended') {
-  await audioCtx.resume();
-}
+  recordingDestination = audioCtx.createMediaStreamDestination();
 
-recordingDestination =
-  audioCtx.createMediaStreamDestination();
-
-const recordingMimeType =
-  MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+  const recordingMimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
     ? 'audio/webm;codecs=opus'
     : 'audio/webm';
 
-simulationRecorder =
-  new MediaRecorder(
-    recordingDestination.stream,
-    { mimeType: recordingMimeType }
-  );
-
-simulationRecorder.addEventListener('dataavailable', ({ data }) => {
-  if (data.size > 0) {
-    recordedAudioChunks.push(data);
-  }
-});
-
-simulationRecorder.start(250);
-    console.log(`[Simulation] ▶ Démarrée : ${currentSimulationId}`);
-  } catch (err) {
-    console.error('[Simulation] Erreur démarrage :', err.message);
-  }
+  simulationRecorder = new MediaRecorder(recordingDestination.stream, { mimeType: recordingMimeType });
+  simulationRecorder.addEventListener('dataavailable', ({ data }) => {
+    if (data.size > 0) recordedAudioChunks.push(data);
+  });
+  simulationRecorder.start(250);
 }
 
 async function stopSimulationRecorder() {
-  if (
-    !simulationRecorder ||
-    simulationRecorder.state === 'inactive'
-  ) {
-    return null;
-  }
+  if (!simulationRecorder || simulationRecorder.state === 'inactive') return null;
 
   return new Promise(resolve => {
+    const recorder = simulationRecorder;
+    recorder.addEventListener('stop', () => {
+      const blob = new Blob(recordedAudioChunks, { type: recorder.mimeType || 'audio/webm' });
+      recordedAudioChunks = [];
+      simulationRecorder = null;
+      resolve(blob);
+    }, { once: true });
 
-    simulationRecorder.addEventListener(
-      'stop',
-      () => {
-
-        const blob =
-          new Blob(
-            recordedAudioChunks,
-            {
-              type:
-                simulationRecorder.mimeType ||
-                'audio/webm'
-            }
-          );
-
-        recordedAudioChunks = [];
-        simulationRecorder = null;
-
-        resolve(blob);
-      },
-      { once: true }
-    );
-
-    simulationRecorder.stop();
+    try {
+      recorder.stop();
+    } catch (_) {
+      resolve(null);
+    }
   });
 }
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
-
     const reader = new FileReader();
-
-    reader.onloadend = () => {
-      const result = reader.result;
-      resolve(result.split(',')[1]);
-    };
-
+    reader.onloadend = () => resolve(reader.result);
     reader.onerror = reject;
-
     reader.readAsDataURL(blob);
   });
 }
+
 async function endSimulation() {
   if (!currentSimulationId) return;
 
-  const dureeSecondes = Math.floor((Date.now() - simulationStartTime) / 1000);
   const simId = currentSimulationId;
+  const dureeSecondes = simulationStartTime
+    ? Math.floor((Date.now() - simulationStartTime) / 1000)
+    : 0;
 
-  currentSimulationId = null;
   btnEnd.classList.add('hidden');
   btnMic.disabled = true;
+  setState(State.THINKING);
   statusLabel.textContent = 'Enregistrement de la simulation...';
 
+  cleanupAudio();
+
   try {
-    // Arrêter l'enregistrement audio complet
-    let audioBase64 = null;
+    const audioBlob = await stopSimulationRecorder();
+    const audioBase64 = audioBlob ? await blobToBase64(audioBlob) : null;
 
-    if (simulationRecorder && simulationRecorder.state !== 'inactive') {
-      const audioBlob = await new Promise(resolve => {
-        simulationRecorder.addEventListener('stop', () => {
-          resolve(new Blob(recordedAudioChunks, { type: simulationRecorder.mimeType }));
-        }, { once: true });
-
-        try {
-          simulationRecorder.stop();
-        } catch (_) {
-          resolve(null);
-        }
-      });
-
-      if (audioBlob && audioBlob.size > 0) {
-        const arrayBuffer = await audioBlob.arrayBuffer();
-        let binary = '';
-        const bytes = new Uint8Array(arrayBuffer);
-        const chunkSize = 0x8000;
-
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-        }
-
-        audioBase64 = btoa(binary);
-      }
-    }
-
-    simulationRecorder = null;
-    recordedAudioChunks = [];
-    recordingDestination = null;
-
-    statusLabel.textContent = 'Génération du bilan...';
-
-    // Clôturer la simulation + envoyer l'audio
     const endRes = await fetch('/api/simulation/end', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authAccessToken ? { Authorization: `Bearer ${authAccessToken}` } : {})
+      },
+      body: JSON.stringify({
         simulationId: simId,
         dureeSecondes,
         transcription: fullTranscription,
@@ -454,43 +376,15 @@ async function endSimulation() {
     });
 
     const endData = await endRes.json();
+    if (!endRes.ok) throw new Error(endData.error || 'Erreur clôture simulation');
 
-    if (!endRes.ok) {
-      throw new Error(endData.error || 'Erreur clôture simulation');
-    }
-
-    // Redirection immédiate vers le dashboard — sans attendre le bilan
-    window.location.href = 'https://alexisgerm111.github.io/daqhboard-kold-kall/';
-
+    window.location.href = `https://alexisgerm111.github.io/daqhboard-kold-kall/?simulationId=${encodeURIComponent(simId)}`;
   } catch (err) {
     console.error('[Simulation] Erreur fin :', err.message);
-    setState(State.IDLE);
+    setState(State.ERROR);
     btnMic.disabled = false;
+    statusLabel.textContent = `Erreur : ${err.message}`;
   }
-}
-
-function showBilan(bilan) {
-  bilanNote.textContent     = `${bilan.note_globale}/10`;
-  bilanPositifs.textContent = bilan.points_positifs;
-  bilanNegatifs.textContent = bilan.points_negatifs;
-  bilanConseils.textContent = bilan.conseils;
-  const note = bilan.note_globale;
-  bilanNote.style.color = note >= 7 ? '#22C55E' : note >= 5 ? '#F59E0B' : '#EF4444';
-  bilanModal.classList.remove('hidden');
-  setState(State.IDLE);
-  btnMic.disabled = false;
-}
-
-function closeBilan() { bilanModal.classList.add('hidden'); }
-
-
-function resetSimulation() {
-  closeBilan();
-  conversationHistory = [];
-  fullTranscription   = [];
-  conversation.innerHTML = '';
-  if (convEmpty) { conversation.appendChild(convEmpty); convEmpty.style.display = ''; }
-  setState(State.IDLE);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -502,18 +396,19 @@ function setState(newState) {
   orbContainer.dataset.state = newState;
 
   const STATUS = {
-    [State.IDLE]     : 'Prêt à écouter',
+    [State.IDLE]: 'Prêt à écouter',
     [State.LISTENING]: 'En écoute...',
-    [State.THINKING] : 'Je réfléchis...',
-    [State.SPEAKING] : 'Je vous réponds...',
-    [State.ERROR]    : 'Une erreur est survenue'
+    [State.THINKING]: 'Je réfléchis...',
+    [State.SPEAKING]: 'Je vous réponds...',
+    [State.ERROR]: 'Une erreur est survenue'
   };
+
   const BTN_LABELS = {
-    [State.IDLE]     : 'Parler',
+    [State.IDLE]: 'Parler',
     [State.LISTENING]: 'Arrêter',
-    [State.THINKING] : 'Patientez...',
-    [State.SPEAKING] : 'Patientez...',
-    [State.ERROR]    : 'Réessayer'
+    [State.THINKING]: 'Patientez...',
+    [State.SPEAKING]: 'Patientez...',
+    [State.ERROR]: 'Réessayer'
   };
 
   statusLabel.textContent = STATUS[newState] || '';
@@ -522,7 +417,7 @@ function setState(newState) {
   [iconMic, iconWave, iconLoader, iconSound, iconError].forEach(el => el.classList.add('hidden'));
   ({ [State.IDLE]: iconMic, [State.LISTENING]: iconWave, [State.THINKING]: iconLoader, [State.SPEAKING]: iconSound, [State.ERROR]: iconError })[newState]?.classList.remove('hidden');
 
-  btnMic.disabled = (newState === State.THINKING || newState === State.SPEAKING);
+  btnMic.disabled = !simulationReady || newState === State.THINKING || newState === State.SPEAKING;
 
   if (newState === State.LISTENING) {
     btnMic.classList.add('listening');
@@ -538,14 +433,14 @@ function setState(newState) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  PIPELINE VOCAL — Son non bloquant (TTS parallèle au stockage)
+//  PIPELINE VOCAL
 // ════════════════════════════════════════════════════════════════════════════
 
 async function handleMicClick() {
-  if (!currentSimulationId && (currentState === State.IDLE || currentState === State.ERROR)) {
-    await startSimulation();
-  }
+  if (!simulationReady || !currentSimulationId) return;
+
   if (currentState === State.IDLE || currentState === State.ERROR) {
+    if (!simulationStartTime) await startSimulation();
     await startListening();
   } else if (currentState === State.LISTENING) {
     await stopListening();
@@ -554,7 +449,10 @@ async function handleMicClick() {
 
 async function startListening() {
   try {
-    if (!navigator.mediaDevices?.getUserMedia) { alert("Navigateur non supporté."); return; }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      alert('Navigateur non supporté.');
+      return;
+    }
 
     const tokenRes = await fetch('/api/deepgram-token');
     if (!tokenRes.ok) throw new Error('Token Deepgram indisponible');
@@ -563,25 +461,34 @@ async function startListening() {
     audioStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 }
     });
-    // Ajouter la voix du commercial à l'enregistrement complet
-if (recordingDestination && audioCtx) {
-  const microphoneSource =
-    audioCtx.createMediaStreamSource(audioStream);
 
-  microphoneSource.connect(recordingDestination);
-}
+    if (recordingDestination && audioCtx) {
+      try {
+        if (microphoneSource) microphoneSource.disconnect();
+        microphoneSource = audioCtx.createMediaStreamSource(audioStream);
+        microphoneSource.connect(recordingDestination);
+      } catch (err) {
+        console.error('[Audio] Connexion micro enregistreur :', err);
+      }
+    }
 
     const params = new URLSearchParams({
-      model: 'nova-3', language: 'fr', smart_format: 'true',
-      interim_results: 'true', punctuate: 'true',
-      endpointing: '1200', utterance_end_ms: '1500'
+      model: 'nova-3',
+      language: 'fr',
+      smart_format: 'true',
+      interim_results: 'true',
+      punctuate: 'true',
+      endpointing: '1200',
+      utterance_end_ms: '1500'
     });
 
     deepgramSocket = new WebSocket(`wss://api.deepgram.com/v1/listen?${params}`, ['token', token]);
 
     deepgramSocket.addEventListener('open', () => {
       setState(State.LISTENING);
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
       mediaRecorder = new MediaRecorder(audioStream, { mimeType });
       mediaRecorder.addEventListener('dataavailable', ({ data }) => {
         if (data.size > 0 && deepgramSocket?.readyState === WebSocket.OPEN) deepgramSocket.send(data);
@@ -592,134 +499,116 @@ if (recordingDestination && audioCtx) {
       }, 5000);
     });
 
-    deepgramSocket.addEventListener('message', async (event) => {
-  if (currentState !== State.LISTENING) return;
+    deepgramSocket.addEventListener('message', async event => {
+      if (currentState !== State.LISTENING) return;
 
-  let data;
-  try {
-    data = JSON.parse(event.data);
-  } catch {
-    return;
-  }
-
-  if (data.type !== 'Results') return;
-
-  const transcript =
-    data.channel?.alternatives?.[0]?.transcript || '';
-
-  if (!transcript.trim()) return;
-
-  if (data.is_final) {
-
-    // Conserver chaque segment final de la prise de parole
-    finalUtteranceParts.push(transcript.trim());
-
-    showTranscript(
-      finalUtteranceParts.join(' '),
-      'final'
-    );
-
-    // speech_final = fin réelle de la prise de parole
-    if (
-      data.speech_final &&
-      !isProcessing
-    ) {
-
-      const completeUtterance =
-        finalUtteranceParts
-          .join(' ')
-          .trim();
-
-      finalUtteranceParts = [];
-
-      if (completeUtterance) {
-        await processUtterance(
-          completeUtterance
-        );
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (_) {
+        return;
       }
-    }
 
-  } else {
+      if (data.type !== 'Results') return;
+      const transcript = data.channel?.alternatives?.[0]?.transcript || '';
+      if (!transcript.trim()) return;
 
-    showTranscript(
-      [
-        ...finalUtteranceParts,
-        transcript.trim()
-      ].join(' '),
-      'interim'
-    );
-  }
-});
+      if (data.is_final) {
+        finalUtteranceParts.push(transcript.trim());
+        interimUtterance = '';
+        showTranscript(finalUtteranceParts.join(' '), 'final');
 
-    deepgramSocket.addEventListener('error', () => { cleanupAudio(); setState(State.ERROR); setTimeout(() => setState(State.IDLE), 3000); });
-    deepgramSocket.addEventListener('close', e => console.log('[DG] Fermé :', e.code));
+        if (data.speech_final && !isProcessing) {
+          const completeUtterance = finalUtteranceParts.join(' ').trim();
+          finalUtteranceParts = [];
+          if (completeUtterance) await processUtterance(completeUtterance);
+        }
+      } else {
+        interimUtterance = transcript.trim();
+        showTranscript([...finalUtteranceParts, interimUtterance].join(' '), 'interim');
+      }
+    });
+
+    deepgramSocket.addEventListener('error', () => {
+      cleanupAudio();
+      setState(State.ERROR);
+    });
   } catch (err) {
     if (err.name === 'NotAllowedError') alert('Accès au microphone refusé.');
     cleanupAudio();
     setState(State.ERROR);
-    setTimeout(() => setState(State.IDLE), 3000);
   }
 }
 
 async function stopListening() {
   if (currentState !== State.LISTENING) return;
 
-  const pendingText =
-    finalUtteranceParts
-      .join(' ')
-      .trim();
-
+  const pendingText = [...finalUtteranceParts, interimUtterance].join(' ').trim();
   finalUtteranceParts = [];
-
+  interimUtterance = '';
   cleanupAudio();
 
-  if (
-    pendingText &&
-    !isProcessing
-  ) {
-    await processUtterance(pendingText);
-  } else if (!isProcessing) {
+  if (pendingText && !isProcessing) await processUtterance(pendingText);
+  else if (!isProcessing) {
     hideTranscript();
     setState(State.IDLE);
   }
 }
 
 async function processUtterance(userText) {
-  if (isProcessing || !userText) return;
+  if (isProcessing || !userText || !currentSimulationId) return;
   isProcessing = true;
   cleanupAudio();
   addMessage('user', userText);
   hideTranscript();
 
-  const elapsed = simulationStartTime ? Math.floor((Date.now() - simulationStartTime) / 1000) : 0;
-  fullTranscription.push({ locuteur: 'commercial', texte: userText, horodatageSecondes: elapsed });
-  conversationHistory.push({ role: 'user', content: userText });
+  const elapsed = simulationStartTime
+    ? Math.floor((Date.now() - simulationStartTime) / 1000)
+    : 0;
+
+  fullTranscription.push({
+    locuteur: 'commercial',
+    texte: userText,
+    horodatageSecondes: elapsed
+  });
 
   setState(State.THINKING);
 
   try {
-    const persona = getPersona(currentPersonaId);
-
-    // ── LLM ─────────────────────────────────────────────────────────────────
     const chatRes = await fetch('/api/chat', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ messages: conversationHistory, systemPrompt: persona.systemPrompt })
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authAccessToken ? { Authorization: `Bearer ${authAccessToken}` } : {})
+      },
+      body: JSON.stringify({
+        simulationId: currentSimulationId,
+        userText,
+        horodatageSecondes: elapsed
+      })
     });
-    if (!chatRes.ok) throw new Error(`Chat API ${chatRes.status}`);
-    const { text: aiText } = await chatRes.json();
+
+    const chatData = await chatRes.json();
+    if (!chatRes.ok) throw new Error(chatData.error || `Chat API ${chatRes.status}`);
+
+    const aiText = chatData.text;
+    if (!aiText) throw new Error('Réponse vide du prospect');
 
     addMessage('ai', aiText);
-    conversationHistory.push({ role: 'assistant', content: aiText });
 
-    const elapsedAi = simulationStartTime ? Math.floor((Date.now() - simulationStartTime) / 1000) : 0;
-    fullTranscription.push({ locuteur: 'ia', texte: aiText, horodatageSecondes: elapsedAi });
+    const elapsedAi = simulationStartTime
+      ? Math.floor((Date.now() - simulationStartTime) / 1000)
+      : elapsed;
 
-    // ── TTS — immédiat, sans attendre autre chose ────────────────────────────
+    fullTranscription.push({
+      locuteur: 'ia',
+      texte: aiText,
+      horodatageSecondes: elapsedAi
+    });
+
     setState(State.SPEAKING);
     await playTTS(aiText);
     setState(State.IDLE);
-
   } catch (err) {
     console.error('[Pipeline] Erreur :', err.message);
     addMessage('ai', 'Désolé, une erreur est survenue. Veuillez réessayer.');
@@ -736,14 +625,13 @@ async function processUtterance(userText) {
 
 async function playTTS(text) {
   const ttsRes = await fetch('/api/tts', {
-    method : 'POST',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body   : JSON.stringify({ text })
+    body: JSON.stringify({ text })
   });
   if (!ttsRes.ok) throw new Error(`Cartesia ${ttsRes.status}`);
 
   const arrayBuffer = await ttsRes.arrayBuffer();
-
   if (!audioCtx || audioCtx.state === 'closed') audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === 'suspended') await audioCtx.resume();
 
@@ -755,17 +643,18 @@ async function playTTS(text) {
   const source = audioCtx.createBufferSource();
   source.buffer = decodedData;
   source.connect(analyserNode);
-analyserNode.connect(audioCtx.destination);
+  analyserNode.connect(audioCtx.destination);
+  if (recordingDestination) analyserNode.connect(recordingDestination);
 
-// Ajouter la voix du prospect à l'enregistrement complet
-if (recordingDestination) {
-  analyserNode.connect(recordingDestination);
-}
-
-startVisualizer();
+  startVisualizer();
   source.start(0);
 
-  return new Promise(resolve => { source.onended = () => { stopVisualizer(); resolve(); }; });
+  await new Promise(resolve => {
+    source.onended = () => {
+      stopVisualizer();
+      resolve();
+    };
+  });
 }
 
 function startVisualizer() {
@@ -774,8 +663,12 @@ function startVisualizer() {
   const ctx = audioViz.getContext('2d');
   const bufLen = analyserNode.frequencyBinCount;
   const data = new Uint8Array(bufLen);
-  const BARS = 28, stride = Math.floor(bufLen / BARS);
-  const W = audioViz.width, H = audioViz.height, gap = 3, barW = (W - gap * (BARS - 1)) / BARS;
+  const BARS = 28;
+  const stride = Math.floor(bufLen / BARS);
+  const W = audioViz.width;
+  const H = audioViz.height;
+  const gap = 3;
+  const barW = (W - gap * (BARS - 1)) / BARS;
 
   function draw() {
     vizFrame = requestAnimationFrame(draw);
@@ -784,7 +677,8 @@ function startVisualizer() {
     for (let i = 0; i < BARS; i++) {
       const val = data[i * stride] / 255;
       const barH = Math.max(4, val * H * 0.88);
-      const x = i * (barW + gap), y = (H - barH) / 2;
+      const x = i * (barW + gap);
+      const y = (H - barH) / 2;
       const grad = ctx.createLinearGradient(x, y, x, y + barH);
       grad.addColorStop(0, `rgba(108, 99, 255, ${0.4 + val * 0.6})`);
       grad.addColorStop(1, `rgba(16, 185, 129, ${0.4 + val * 0.6})`);
@@ -806,14 +700,31 @@ function stopVisualizer() {
 }
 
 function cleanupAudio() {
-  clearInterval(keepAliveTimer); keepAliveTimer = null;
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch (_) {} }
+  clearInterval(keepAliveTimer);
+  keepAliveTimer = null;
+
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try { mediaRecorder.stop(); } catch (_) {}
+  }
   mediaRecorder = null;
+
   if (deepgramSocket) {
-    try { if (deepgramSocket.readyState === WebSocket.OPEN) deepgramSocket.send(JSON.stringify({ type: 'CloseStream' })); deepgramSocket.close(); } catch (_) {}
+    try {
+      if (deepgramSocket.readyState === WebSocket.OPEN) deepgramSocket.send(JSON.stringify({ type: 'CloseStream' }));
+      deepgramSocket.close();
+    } catch (_) {}
     deepgramSocket = null;
   }
-  if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
+
+  if (audioStream) {
+    audioStream.getTracks().forEach(track => track.stop());
+    audioStream = null;
+  }
+
+  if (microphoneSource) {
+    try { microphoneSource.disconnect(); } catch (_) {}
+    microphoneSource = null;
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -822,19 +733,19 @@ function cleanupAudio() {
 
 function showTranscript(text, mode) {
   transcriptLive.textContent = text;
-  transcriptLive.className   = `transcript-live visible ${mode}`;
+  transcriptLive.className = `transcript-live visible ${mode}`;
 }
 
 function hideTranscript() {
   transcriptLive.textContent = '';
-  transcriptLive.className   = 'transcript-live';
+  transcriptLive.className = 'transcript-live';
 }
 
 function addMessage(role, text) {
   if (convEmpty) convEmpty.style.display = 'none';
   const isUser = role === 'user';
   const userSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
-  const aiSvg   = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="10" x="3" y="11" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" x2="8" y1="16" y2="16"/><line x1="16" x2="16" y1="16" y2="16"/></svg>`;
+  const aiSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="10" x="3" y="11" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" x2="8" y1="16" y2="16"/><line x1="16" x2="16" y1="16" y2="16"/></svg>`;
   const el = document.createElement('div');
   el.className = `message ${role}`;
   el.innerHTML = `<div class="msg-avatar" aria-hidden="true">${isUser ? userSvg : aiSvg}</div><div class="msg-bubble">${escapeHtml(text)}</div>`;
@@ -843,76 +754,43 @@ function addMessage(role, text) {
 }
 
 function escapeHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;').replace(/\n/g,'<br>');
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  PERSONAS
-// ════════════════════════════════════════════════════════════════════════════
-
-function getPersona(id) { return PERSONAS.find(p => p.id === id) ?? PERSONAS[0]; }
-
-function renderPersonaGrid() {
-  personaGrid.innerHTML = PERSONAS.map(p => `
-    <button class="persona-card ${p.id === currentPersonaId ? 'active' : ''}" data-pid="${p.id}" style="--card-clr: ${p.color}" aria-pressed="${p.id === currentPersonaId}">
-      <div class="card-icon">${p.iconSvg}</div>
-      <div class="card-name">${p.name}</div>
-      <div class="card-desc">${p.description}</div>
-    </button>
-  `).join('');
-  personaGrid.querySelectorAll('.persona-card').forEach(card => {
-    card.addEventListener('click', () => { selectPersona(card.dataset.pid); closeModal(); });
-  });
-}
-
-function selectPersona(id) {
-  if (currentSimulationId) return;
-  currentPersonaId = id;
-  conversationHistory = []; fullTranscription = [];
-  conversation.innerHTML = '';
-  if (convEmpty) { conversation.appendChild(convEmpty); convEmpty.style.display = ''; }
-  const p = getPersona(id);
-  personaBadge.textContent = p.name;
-  document.documentElement.style.setProperty('--accent', p.color);
-  document.documentElement.style.setProperty('--clr-idle', p.color);
-  renderPersonaGrid();
-}
-
-function openModal() {
-  if (currentState !== State.IDLE && currentState !== State.ERROR) return;
-  renderPersonaGrid();
-  modalOverlay.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-}
-
-function closeModal() {
-  modalOverlay.classList.add('hidden');
-  document.body.style.overflow = '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+    .replace(/\n/g, '<br>');
 }
 
 // ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  init(); // synchrone — tous les event listeners sont attachés avant la suite
+  init();
 
-  // Bypass login si token Supabase passé depuis le dashboard
   const params = new URLSearchParams(window.location.search);
-  const token  = params.get('token');
-  if (!token) return;
+  const token = params.get('token');
+  const simulationId = params.get('simulationId');
+
+  if (!token || !simulationId) return;
 
   window.history.replaceState({}, '', window.location.pathname);
+  authAccessToken = token;
 
   fetch('/api/auth/login-token', {
-    method : 'POST',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body   : JSON.stringify({ token })
+    body: JSON.stringify({ token })
   })
-    .then(res => res.json().then(data => ({ ok: res.ok, data })))
-    .then(({ ok, data }) => {
-      if (ok && data.user) {
-        currentUser    = data.user;
-        currentProfile = data.profile;
-        showApp();
-      }
+    .then(async res => ({ ok: res.ok, data: await res.json() }))
+    .then(async ({ ok, data }) => {
+      if (!ok || !data.user) throw new Error(data.error || 'Authentification impossible');
+      currentUser = data.user;
+      currentProfile = data.profile;
+      showApp();
+      await loadSimulationContext(simulationId);
     })
-    .catch(err => console.warn('[Auth] Erreur token URL :', err.message));
+    .catch(err => {
+      console.warn('[Auth] Erreur token URL :', err.message);
+      statusLabel.textContent = 'Impossible de charger la simulation.';
+    });
 });
