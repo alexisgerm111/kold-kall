@@ -12,10 +12,7 @@
 </head>
 <body>
 
-  <!-- ═══════════════════════════════════════════════════
-       ÉCRAN DE LOGIN
-  ═══════════════════════════════════════════════════ -->
-  <div id="login-screen" class="login-screen">
+  <div id="login-screen" class="login-screen hidden">
     <div class="login-card">
       <div class="login-brand">
         <div class="brand-icon">
@@ -83,9 +80,6 @@
     </div>
   </div>
 
-  <!-- ═══════════════════════════════════════════════════
-       APP PRINCIPALE
-  ═══════════════════════════════════════════════════ -->
   <div id="app-screen" class="app-shell hidden">
     <header class="topbar">
       <div class="topbar-brand">
@@ -121,6 +115,7 @@
             </div>
           </div>
         </div>
+        <p class="prospect-name" id="prospect-name" hidden></p>
         <p class="status-label" id="status-label" aria-live="polite">Lance une simulation depuis le dashboard.</p>
         <canvas class="audio-viz" id="audio-viz" width="280" height="48"></canvas>
       </section>
