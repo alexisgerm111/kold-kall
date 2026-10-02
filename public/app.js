@@ -1,13 +1,12 @@
 // ════════════════════════════════════════════════════════════════════════════
 //  KOLD KALL V1 — Logique Frontend
-//  Auth : login, signup, mot de passe oublié
+//  Auth : handshake code à usage unique (aucun token dans l'URL)
 //  Pipeline : Deepgram → Gemini 3.5 Flash Lite → Cartesia
-//  Configuration et contexte : serveur / Supabase
+//  Audio : streaming par chunks vers le serveur (aucune perte possible)
 // ════════════════════════════════════════════════════════════════════════════
 
 'use strict';
 
-// ─── ÉTAT GLOBAL ─────────────────────────────────────────────────────────────
 const State = Object.freeze({
   IDLE: 'idle',
   LISTENING: 'listening',
@@ -19,17 +18,17 @@ const State = Object.freeze({
 let currentState = State.IDLE;
 let isProcessing = false;
 
-// Session
 let currentUser = null;
 let currentProfile = null;
 let authAccessToken = null;
+let authRefreshToken = null;
+let tokenRefreshTimer = null;
 let currentSimulationId = null;
 let currentSimulationConfig = null;
 let simulationReady = false;
 let simulationStartTime = null;
 let fullTranscription = [];
 
-// Audio/réseau
 let deepgramSocket = null;
 let mediaRecorder = null;
 let audioStream = null;
@@ -38,17 +37,17 @@ let audioCtx = null;
 let analyserNode = null;
 let vizFrame = null;
 
-// Enregistrement complet de la simulation
-let simulationRecorder = null;
-let recordedAudioChunks = [];
+let recordingMediaRecorder = null;
 let recordingDestination = null;
 let microphoneSource = null;
+let chunkSequence = 0;
+let pendingChunks = [];
+let chunkFlusherInterval = null;
+let lastFlushInFlight = false;
 
-// Agrégation des segments Deepgram
 let finalUtteranceParts = [];
 let interimUtterance = '';
 
-// ─── DOM ──────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
 const loginScreen = $('login-screen');
@@ -75,6 +74,7 @@ const toggleEyeSignup = $('toggle-eye-signup');
 const btnShowLogin = $('btn-show-login');
 
 const userNameEl = $('user-name');
+const prospectNameEl = $('prospect-name');
 const orbContainer = $('orb-container');
 const statusLabel = $('status-label');
 const transcriptLive = $('transcript-live');
@@ -94,10 +94,6 @@ const iconError = $('icon-error');
 const micIconDefault = $('mic-icon-default');
 const micIconStop = $('mic-icon-stop');
 
-// ════════════════════════════════════════════════════════════════════════════
-//  INIT
-// ════════════════════════════════════════════════════════════════════════════
-
 function init() {
   loginForm.addEventListener('submit', handleLogin);
   toggleEyeLogin.addEventListener('click', () => togglePasswordVisibility(loginPassword, toggleEyeLogin));
@@ -111,10 +107,6 @@ function init() {
   btnMic.addEventListener('click', handleMicClick);
   btnEnd.addEventListener('click', endSimulation);
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-//  AUTH
-// ════════════════════════════════════════════════════════════════════════════
 
 function togglePasswordVisibility(input, btn) {
   const isHidden = input.type === 'password';
@@ -158,6 +150,8 @@ async function handleLogin(e) {
     currentUser = data.user;
     currentProfile = data.profile;
     authAccessToken = data.session?.access_token || null;
+    authRefreshToken = data.session?.refresh_token || null;
+    if (authRefreshToken) scheduleTokenRefresh();
     showApp();
   } catch (err) {
     loginError.textContent = err.message;
@@ -223,6 +217,33 @@ async function handleForgotPassword() {
   }
 }
 
+async function refreshAccessToken() {
+  if (!authRefreshToken) return false;
+  try {
+    const res = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: authRefreshToken })
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (!data.access_token) return false;
+    authAccessToken = data.access_token;
+    if (data.refresh_token) authRefreshToken = data.refresh_token;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function scheduleTokenRefresh() {
+  if (tokenRefreshTimer) clearTimeout(tokenRefreshTimer);
+  tokenRefreshTimer = setTimeout(async () => {
+    await refreshAccessToken();
+    scheduleTokenRefresh();
+  }, 55 * 60 * 1000);
+}
+
 function showApp() {
   loginScreen.classList.add('hidden');
   appScreen.classList.remove('hidden');
@@ -237,10 +258,6 @@ function showApp() {
   }
   setState(State.IDLE);
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-//  CONTEXTE SIMULATION
-// ════════════════════════════════════════════════════════════════════════════
 
 async function loadSimulationContext(simulationId) {
   simulationReady = false;
@@ -275,6 +292,17 @@ async function loadSimulationContext(simulationId) {
       convEmpty.style.display = '';
     }
 
+    const identite = data.prospect_visible_context?.identite || {};
+    const fullName = [identite.prenom, identite.nom].filter(Boolean).join(' ').trim();
+    if (prospectNameEl) {
+      if (fullName) {
+        prospectNameEl.textContent = `Prospect : ${fullName}`;
+        prospectNameEl.hidden = false;
+      } else {
+        prospectNameEl.hidden = true;
+      }
+    }
+
     btnMic.disabled = false;
     const phaseLabel = data.simulation.type_entretien === 'cold_call'
       ? 'Cold Call'
@@ -286,16 +314,28 @@ async function loadSimulationContext(simulationId) {
   throw new Error('La préparation du scénario prend trop de temps. Réessaie depuis le dashboard.');
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  ENREGISTREMENT SIMULATION
-// ════════════════════════════════════════════════════════════════════════════
+function blobToBase64Raw(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = String(reader.result || '');
+      const commaIdx = result.indexOf(',');
+      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
 
 async function startSimulation() {
   if (!currentUser || !currentSimulationId || !simulationReady) return;
 
   simulationStartTime = Date.now();
   btnEnd.classList.remove('hidden');
-  recordedAudioChunks = [];
+  btnEnd.disabled = false;
+  btnEnd.textContent = 'Terminer';
+  chunkSequence = 0;
+  pendingChunks = [];
 
   if (!audioCtx || audioCtx.state === 'closed') {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -308,51 +348,100 @@ async function startSimulation() {
     ? 'audio/webm;codecs=opus'
     : 'audio/webm';
 
-  simulationRecorder = new MediaRecorder(recordingDestination.stream, { mimeType: recordingMimeType });
-  simulationRecorder.addEventListener('dataavailable', ({ data }) => {
-    if (data.size > 0) recordedAudioChunks.push(data);
-  });
-  simulationRecorder.start(250);
-}
+  recordingMediaRecorder = new MediaRecorder(recordingDestination.stream, { mimeType: recordingMimeType });
 
-async function stopSimulationRecorder() {
-  if (!simulationRecorder || simulationRecorder.state === 'inactive') return null;
-
-  return new Promise(resolve => {
-    const recorder = simulationRecorder;
-    recorder.addEventListener('stop', () => {
-      const blob = new Blob(recordedAudioChunks, { type: recorder.mimeType || 'audio/webm' });
-      recordedAudioChunks = [];
-      simulationRecorder = null;
-      resolve(blob);
-    }, { once: true });
-
+  recordingMediaRecorder.addEventListener('dataavailable', async ({ data }) => {
+    if (!data || data.size === 0) return;
     try {
-      recorder.stop();
-    } catch (_) {
-      resolve(null);
+      const b64 = await blobToBase64Raw(data);
+      pendingChunks.push({ sequence: chunkSequence++, data: b64 });
+    } catch (err) {
+      console.error('[Recording] blobToBase64 :', err);
     }
   });
+
+  recordingMediaRecorder.start(500);
+
+  if (chunkFlusherInterval) clearInterval(chunkFlusherInterval);
+  chunkFlusherInterval = setInterval(flushChunks, 5000);
 }
 
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
+async function flushChunks() {
+  if (lastFlushInFlight) return;
+  if (pendingChunks.length === 0) return;
+
+  lastFlushInFlight = true;
+  const toSend = pendingChunks.splice(0, pendingChunks.length);
+
+  for (const chunk of toSend) {
+    let ok = false;
+    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+      try {
+        const res = await fetch('/api/recording/chunk', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authAccessToken ? { Authorization: `Bearer ${authAccessToken}` } : {})
+          },
+          body: JSON.stringify({
+            simulationId: currentSimulationId,
+            sequence: chunk.sequence,
+            data: chunk.data
+          })
+        });
+        if (res.ok) ok = true;
+        else if (res.status === 409) ok = true;
+        else if (res.status === 401 && await refreshAccessToken()) continue;
+        else await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      } catch (_) {
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    if (!ok) {
+      pendingChunks.push(chunk);
+    }
+  }
+
+  lastFlushInFlight = false;
+}
+
+async function stopChunkStreaming() {
+  if (chunkFlusherInterval) {
+    clearInterval(chunkFlusherInterval);
+    chunkFlusherInterval = null;
+  }
+
+  if (recordingMediaRecorder && recordingMediaRecorder.state !== 'inactive') {
+    await new Promise(resolve => {
+      const rec = recordingMediaRecorder;
+      let resolved = false;
+      const finish = () => { if (!resolved) { resolved = true; resolve(); } };
+      rec.addEventListener('stop', finish, { once: true });
+      try { rec.stop(); } catch (_) { finish(); }
+      setTimeout(finish, 2000);
+    });
+    await new Promise(r => setTimeout(r, 300));
+  }
+  recordingMediaRecorder = null;
+
+  for (let pass = 0; pass < 3; pass++) {
+    await flushChunks();
+    if (pendingChunks.length === 0) break;
+    await new Promise(r => setTimeout(r, 500));
+  }
 }
 
 async function endSimulation() {
   if (!currentSimulationId) return;
+  if (btnEnd.disabled) return;
 
   const simId = currentSimulationId;
   const dureeSecondes = simulationStartTime
     ? Math.floor((Date.now() - simulationStartTime) / 1000)
     : 0;
 
-  btnEnd.classList.add('hidden');
+  btnEnd.disabled = true;
+  btnEnd.textContent = 'Enregistrement...';
   btnMic.disabled = true;
   setState(State.THINKING);
   statusLabel.textContent = 'Enregistrement de la simulation...';
@@ -360,8 +449,7 @@ async function endSimulation() {
   cleanupAudio();
 
   try {
-    const audioBlob = await stopSimulationRecorder();
-    const audioBase64 = audioBlob ? await blobToBase64(audioBlob) : null;
+    await stopChunkStreaming();
 
     const endRes = await fetch('/api/simulation/end', {
       method: 'POST',
@@ -372,26 +460,32 @@ async function endSimulation() {
       body: JSON.stringify({
         simulationId: simId,
         dureeSecondes,
-        transcription: fullTranscription,
-        audioBase64
+        transcription: fullTranscription
       })
     });
 
     const endData = await endRes.json();
     if (!endRes.ok) throw new Error(endData.error || 'Erreur clôture simulation');
 
+    fetch('/api/recording/finalize', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authAccessToken ? { Authorization: `Bearer ${authAccessToken}` } : {})
+      },
+      body: JSON.stringify({ simulationId: simId })
+    }).catch(() => {});
+
     window.location.href = `https://alexisgerm111.github.io/daqhboard-kold-kall/?simulationId=${encodeURIComponent(simId)}`;
   } catch (err) {
     console.error('[Simulation] Erreur fin :', err.message);
     setState(State.ERROR);
     btnMic.disabled = false;
+    btnEnd.disabled = false;
+    btnEnd.textContent = 'Terminer';
     statusLabel.textContent = `Erreur : ${err.message}`;
   }
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-//  MACHINE D'ÉTAT
-// ════════════════════════════════════════════════════════════════════════════
 
 function setState(newState) {
   currentState = newState;
@@ -434,10 +528,6 @@ function setState(newState) {
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  PIPELINE VOCAL
-// ════════════════════════════════════════════════════════════════════════════
-
 async function handleMicClick() {
   if (!simulationReady || !currentSimulationId) return;
 
@@ -456,7 +546,9 @@ async function startListening() {
       return;
     }
 
-    const tokenRes = await fetch('/api/deepgram-token');
+    const tokenRes = await fetch('/api/deepgram-token', {
+      headers: authAccessToken ? { Authorization: `Bearer ${authAccessToken}` } : {}
+    });
     if (!tokenRes.ok) throw new Error('Token Deepgram indisponible');
     const { token } = await tokenRes.json();
 
@@ -621,14 +713,13 @@ async function processUtterance(userText) {
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  TTS + AUDIO
-// ════════════════════════════════════════════════════════════════════════════
-
 async function playTTS(text) {
   const ttsRes = await fetch('/api/tts', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authAccessToken ? { Authorization: `Bearer ${authAccessToken}` } : {})
+    },
     body: JSON.stringify({ text })
   });
   if (!ttsRes.ok) throw new Error(`Cartesia ${ttsRes.status}`);
@@ -729,10 +820,6 @@ function cleanupAudio() {
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  UI HELPERS
-// ════════════════════════════════════════════════════════════════════════════
-
 function showTranscript(text, mode) {
   transcriptLive.textContent = text;
   transcriptLive.className = `transcript-live visible ${mode}`;
@@ -765,34 +852,50 @@ function escapeHtml(str) {
     .replace(/\n/g, '<br>');
 }
 
-// ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   init();
 
   const params = new URLSearchParams(window.location.search);
-  const token = params.get('token');
+  const code = params.get('code');
   const simulationId = params.get('simulationId');
 
-  if (!token || !simulationId) return;
+  if (!code || !simulationId) {
+    loginScreen.classList.remove('hidden');
+    return;
+  }
 
   window.history.replaceState({}, '', window.location.pathname);
-  authAccessToken = token;
 
-  fetch('/api/auth/login-token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token })
-  })
-    .then(async res => ({ ok: res.ok, data: await res.json() }))
-    .then(async ({ ok, data }) => {
-      if (!ok || !data.user) throw new Error(data.error || 'Authentification impossible');
-      currentUser = data.user;
-      currentProfile = data.profile;
-      showApp();
-      await loadSimulationContext(simulationId);
-    })
-    .catch(err => {
-      console.warn('[Auth] Erreur token URL :', err.message);
-      statusLabel.textContent = 'Impossible de charger la simulation.';
+  try {
+    const exchangeRes = await fetch('/api/auth/exchange', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
     });
+
+    if (!exchangeRes.ok) {
+      const data = await exchangeRes.json().catch(() => ({}));
+      throw new Error(data.error || 'Échange impossible');
+    }
+
+    const data = await exchangeRes.json();
+    authAccessToken = data.access_token;
+    authRefreshToken = data.refresh_token;
+    currentUser = data.user;
+    currentProfile = data.profile;
+
+    showApp();
+    if (authRefreshToken) scheduleTokenRefresh();
+
+    try {
+      await loadSimulationContext(simulationId);
+    } catch (err) {
+      console.warn('[Auth] Erreur contexte sim :', err.message);
+      statusLabel.textContent = 'Impossible de charger la simulation.';
+    }
+  } catch (err) {
+    console.error('[Auth] Handshake :', err.message);
+    loginScreen.classList.remove('hidden');
+    statusLabel.textContent = 'Session expirée. Retourne au dashboard.';
+  }
 });
