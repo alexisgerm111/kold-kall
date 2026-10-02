@@ -2,6 +2,7 @@
 //  KOLD KALL — Serveur Express
 //  STT : Deepgram nova-3  |  LLM : Gemini 3.5 Flash Lite  |  TTS : Cartesia sonic-3.5
 //  PERSONA + BILAN : Gemini 3.1 Pro Preview  |  BDD : Supabase
+//  Auth : handshake code à usage unique + routes protégées
 // ════════════════════════════════════════════════════════════════════════════
 
 import express from 'express';
@@ -10,6 +11,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import dns from 'dns/promises';
 import net from 'net';
+import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
@@ -21,12 +23,13 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── CORS Dashboard ──────────────────────────────────────────────────────────
+// ─── CORS + Referrer-Policy ─────────────────────────────────────────────────
 const ALLOWED_CORS_ORIGINS = new Set([
   'https://alexisgerm111.github.io'
 ]);
 
 app.use((req, res, next) => {
+  res.setHeader('Referrer-Policy', 'no-referrer');
   const origin = req.headers.origin;
   if (origin && ALLOWED_CORS_ORIGINS.has(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -71,6 +74,21 @@ const supabaseAdmin = createClient(
 );
 
 const preparingSimulationIds = new Set();
+
+// ─── Prewarm cache (persona pré-générée) ────────────────────────────────────
+const prewarmCache = new Map();
+const PREWARM_TTL_MS = 15 * 60 * 1000;
+
+// ─── Handshake codes (auth à usage unique) ──────────────────────────────────
+const handshakeCodes = new Map();
+const HANDSHAKE_TTL_MS = 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, value] of handshakeCodes) {
+    if (now - value.createdAt > HANDSHAKE_TTL_MS) handshakeCodes.delete(code);
+  }
+}, 60 * 1000).unref?.();
 
 // ════════════════════════════════════════════════════════════════════════════
 //  HELPERS
@@ -166,15 +184,26 @@ async function callGemini(model, prompt, { maxOutputTokens = 4000, temperature =
   return text;
 }
 
-
 const URL_ANALYSIS_SCHEMA = {
   type: 'object',
   properties: {
     type_entreprise: { type: 'string' },
     produit_service: { type: 'string' },
+    type_entreprise_prospect: { type: 'string' },
     faits_publics: { type: 'array', items: { type: 'string' } }
   },
   required: ['type_entreprise', 'produit_service', 'faits_publics']
+};
+
+const IDENTITE_SCHEMA = {
+  type: 'object',
+  properties: {
+    nom: { type: 'string' },
+    prenom: { type: 'string' },
+    email: { type: 'string' },
+    telephone: { type: 'string' },
+    poste: { type: 'string' }
+  }
 };
 
 const PERSONA_SCHEMA = {
@@ -183,7 +212,8 @@ const PERSONA_SCHEMA = {
     PERSONA_COMPLETE: {
       type: 'object',
       properties: {
-        identite: { type: 'object' }, role_ou_profil: { type: 'string' }, contexte: { type: 'string' },
+        identite: IDENTITE_SCHEMA,
+        role_ou_profil: { type: 'string' }, contexte: { type: 'string' },
         faits_observables: { type: 'array', items: { type: 'string' } },
         hypotheses_scenario: { type: 'array', items: { type: 'string' } },
         situation_actuelle: { type: 'string' }, enjeux: { type: 'array', items: { type: 'string' } },
@@ -201,7 +231,8 @@ const PERSONA_SCHEMA = {
     PROSPECT_VISIBLE_CONTEXT: {
       type: 'object',
       properties: {
-        identite: { type: 'object' }, role_ou_profil: { type: 'string' }, contexte: { type: 'string' },
+        identite: IDENTITE_SCHEMA,
+        role_ou_profil: { type: 'string' }, contexte: { type: 'string' },
         informations_connues_au_demarrage: { type: 'array', items: { type: 'string' } }, situation: { type: 'string' },
         objectifs_connus: { type: 'array', items: { type: 'string' } }, attitude_initiale: { type: 'string' },
         niveau_ouverture: { type: 'number' }, niveau_confiance: { type: 'number' },
@@ -254,7 +285,8 @@ async function callGeminiStructured(model, prompt, schema, { maxOutputTokens = 4
         generationConfig: {
           maxOutputTokens,
           temperature,
-          responseFormat: { text: { mimeType: 'application/json', schema } }
+          responseMimeType: 'application/json',
+          responseSchema: schema
         }
       })
     }
@@ -270,9 +302,9 @@ async function callGeminiStructured(model, prompt, schema, { maxOutputTokens = 4
     console.error(`[Gemini] ${model} réponse vide :`, JSON.stringify(data).slice(0, 1500));
     throw new Error(`Gemini ${model} n'a retourné aucun contenu`);
   }
-  try { return JSON.parse(text); }
+  try { return parseGeminiJson(text); }
   catch (error) {
-    console.error(`[Gemini] ${model} JSON invalide malgré structured output :`, text.slice(0, 1500));
+    console.error(`[Gemini] ${model} JSON invalide :`, text.slice(0, 1500));
     throw new Error(`Réponse Gemini JSON invalide : ${error.message}`);
   }
 }
@@ -580,9 +612,16 @@ async function fetchPublicPageText(rawUrl) {
         redirect: 'manual',
         signal: controller.signal,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Cache-Control': 'max-age=0',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
+          'Connection': 'keep-alive'
         }
       });
     } finally {
@@ -706,7 +745,7 @@ Sépare strictement :
 Réponds uniquement avec ce JSON :
 {
   "PERSONA_COMPLETE": {
-    "identite": {},
+    "identite": { "nom": "", "prenom": "", "email": "", "telephone": "", "poste": "" },
     "role_ou_profil": "",
     "contexte": "",
     "faits_observables": [],
@@ -733,7 +772,7 @@ Réponds uniquement avec ce JSON :
     "point_de_depart_conversation": ""
   },
   "PROSPECT_VISIBLE_CONTEXT": {
-    "identite": {},
+    "identite": { "nom": "", "prenom": "", "email": "", "telephone": "", "poste": "" },
     "role_ou_profil": "",
     "contexte": "",
     "informations_connues_au_demarrage": [],
@@ -830,6 +869,70 @@ async function persistMicroComportements({ simulationId, userId, transcription, 
   if (error) throw error;
 }
 
+// ─── Cleanup opportuniste des chunks orphelins ──────────────────────────────
+let lastChunksCleanup = 0;
+const CHUNKS_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+
+function maybeCleanupChunks() {
+  const now = Date.now();
+  if (now - lastChunksCleanup < CHUNKS_CLEANUP_INTERVAL_MS) return;
+  lastChunksCleanup = now;
+  const cutoff = new Date(now - 2 * 3600 * 1000).toISOString();
+  supabaseAdmin
+    .from('recording_chunks')
+    .delete()
+    .lt('created_at', cutoff)
+    .then(() => {})
+    .catch(err => console.error('[Chunks cleanup]', err.message));
+}
+
+// ─── Fusion finale des chunks audio ─────────────────────────────────────────
+async function finalizeRecording(simulationId, userId) {
+  const { data: existing } = await supabaseAdmin
+    .from('simulations')
+    .select('url_audio')
+    .eq('id', simulationId)
+    .single();
+  if (existing?.url_audio) return existing.url_audio;
+
+  const { data: chunks, error } = await supabaseAdmin
+    .from('recording_chunks')
+    .select('sequence, data')
+    .eq('simulation_id', simulationId)
+    .order('sequence', { ascending: true });
+
+  if (error) throw error;
+  if (!chunks || chunks.length === 0) return null;
+
+  const buffers = chunks.map(c => Buffer.from(c.data, 'base64'));
+  const merged = Buffer.concat(buffers);
+
+  const audioPath = `${userId}/${simulationId}.webm`;
+  const { error: uploadError } = await supabaseAdmin.storage
+    .from('simulation-audio')
+    .upload(audioPath, merged, {
+      contentType: 'audio/webm',
+      cacheControl: '3600',
+      upsert: true
+    });
+  if (uploadError) throw uploadError;
+
+  const { data: signedUrlData, error: signedUrlError } = await supabaseAdmin.storage
+    .from('simulation-audio')
+    .createSignedUrl(audioPath, 60 * 60 * 24 * 365);
+  if (signedUrlError) throw signedUrlError;
+
+  await supabaseAdmin
+    .from('simulations')
+    .update({ url_audio: signedUrlData.signedUrl })
+    .eq('id', simulationId);
+
+  await supabaseAdmin.from('recording_chunks').delete().eq('simulation_id', simulationId);
+
+  console.log(`[Recording] ✅ Fusion finale : ${simulationId} (${(merged.length / 1024).toFixed(1)} KB)`);
+  return signedUrlData.signedUrl;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  AUTH
 // ════════════════════════════════════════════════════════════════════════════
@@ -855,6 +958,90 @@ app.post('/api/auth/login-token', async (req, res) => {
     if (error || !data?.user) return res.status(401).json({ error: 'Token invalide ou expiré' });
     const profile = await getProfile(data.user.id);
     res.json({ user: data.user, profile });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/handshake', async (req, res) => {
+  const user = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentification requise' });
+
+  const authorization = req.headers.authorization || '';
+  const accessToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : null;
+  const { refresh_token } = req.body;
+  if (!accessToken || !refresh_token) {
+    return res.status(400).json({ error: 'access_token et refresh_token requis' });
+  }
+
+  const code = crypto.randomBytes(32).toString('base64url');
+  handshakeCodes.set(code, {
+    accessToken,
+    refreshToken: refresh_token,
+    userId: user.id,
+    createdAt: Date.now(),
+    used: false
+  });
+
+  res.json({ code, expiresIn: 60 });
+});
+
+app.post('/api/auth/exchange', async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'code requis' });
+
+  const entry = handshakeCodes.get(code);
+  if (!entry) return res.status(401).json({ error: 'Code invalide ou expiré' });
+  if (entry.used) {
+    handshakeCodes.delete(code);
+    return res.status(401).json({ error: 'Code déjà utilisé' });
+  }
+  if (Date.now() - entry.createdAt > HANDSHAKE_TTL_MS) {
+    handshakeCodes.delete(code);
+    return res.status(401).json({ error: 'Code expiré' });
+  }
+
+  handshakeCodes.delete(code);
+
+  const profile = await getProfile(entry.userId);
+  const { data: userData } = await supabaseAdmin.auth.admin.getUserById(entry.userId);
+
+  res.json({
+    access_token: entry.accessToken,
+    refresh_token: entry.refreshToken,
+    user: userData?.user || { id: entry.userId },
+    profile
+  });
+});
+
+app.post('/api/auth/refresh', async (req, res) => {
+  const { refresh_token } = req.body;
+  if (!refresh_token) return res.status(400).json({ error: 'refresh_token requis' });
+
+  try {
+    const response = await fetch(
+      `${process.env.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': process.env.SUPABASE_KEY
+        },
+        body: JSON.stringify({ refresh_token })
+      }
+    );
+    const data = await response.json();
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: data.error_description || data.error || 'Refresh échoué'
+      });
+    }
+    res.json({
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_in: data.expires_in,
+      user: data.user
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1006,11 +1193,83 @@ async function prepareSimulationById(simulationId) {
 
 function ensureSimulationPreparation(simulationId) { void prepareSimulationById(simulationId); }
 
+app.post('/api/simulation/prewarm', async (req, res) => {
+  const user = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentification requise' });
+
+  const { sessionId, ...wizardData } = req.body;
+  if (!sessionId) return res.status(400).json({ error: 'sessionId requis' });
+
+  res.json({ status: 'started' });
+
+  const now = Date.now();
+  for (const [key, value] of prewarmCache) {
+    if (now - value.createdAt > PREWARM_TTL_MS) prewarmCache.delete(key);
+  }
+
+  (async () => {
+    try {
+      const cached = prewarmCache.get(sessionId);
+      if (cached && now - cached.createdAt < PREWARM_TTL_MS) return;
+
+      const simulation = {
+        b2b_b2c: wizardData.b2b_b2c,
+        type_entretien: wizardData.type_entretien,
+        phase_choisie: wizardData.phase_choisie || null,
+        vendeur_type_entreprise: wizardData.vendeur_type_entreprise || '',
+        vendeur_produit: wizardData.vendeur_produit || '',
+        vendeur_url: wizardData.vendeur_url || '',
+        prospect_role: wizardData.prospect_role || '',
+        prospect_type_entreprise: wizardData.prospect_type_entreprise || '',
+        prospect_url: wizardData.prospect_url || '',
+        prospect_profile: wizardData.prospect_profile || '',
+        simulation_precedente_id: null,
+        continuite_rdv: null
+      };
+
+      if (simulation.vendeur_url && (!simulation.vendeur_type_entreprise || !simulation.vendeur_produit)) {
+        try {
+          const seller = await analyzePublicUrl(simulation.vendeur_url, 'vendeur', { b2b_b2c: simulation.b2b_b2c });
+          if (!simulation.vendeur_type_entreprise && seller.type_entreprise) simulation.vendeur_type_entreprise = seller.type_entreprise;
+          if (!simulation.vendeur_produit && seller.produit_service) simulation.vendeur_produit = seller.produit_service;
+        } catch (err) {
+          console.warn(`[Prewarm] Enrichissement vendeur échoué : ${err.message}`);
+        }
+      }
+      if (simulation.b2b_b2c === 'b2b' && simulation.prospect_url && !simulation.prospect_type_entreprise) {
+        try {
+          const prospect = await analyzePublicUrl(simulation.prospect_url, 'prospect', { b2b_b2c: simulation.b2b_b2c, prospect_role: simulation.prospect_role });
+          if (prospect.type_entreprise_prospect) simulation.prospect_type_entreprise = prospect.type_entreprise_prospect;
+        } catch (err) {
+          console.warn(`[Prewarm] Enrichissement prospect échoué : ${err.message}`);
+        }
+      }
+
+      const { persona_complete, prospect_visible_context } = await buildSimulationPersona({
+        simulationContext: buildSimulationContextFromRow(simulation),
+        previousSimulation: null,
+        previousTranscriptions: []
+      });
+
+      prewarmCache.set(sessionId, {
+        persona_complete,
+        prospect_visible_context,
+        simulation_enriched: simulation,
+        createdAt: Date.now()
+      });
+      console.log(`[Prewarm] ✅ ${sessionId}`);
+    } catch (err) {
+      console.error(`[Prewarm] ❌ ${sessionId}:`, err.message);
+    }
+  })();
+});
+
 app.post('/api/simulation/start', async (req, res) => {
   const user = await getAuthenticatedUser(req);
   if (!user) return res.status(401).json({ error: 'Authentification requise' });
 
   const {
+    sessionId,
     b2b_b2c, vendeur_type_entreprise, vendeur_produit, vendeur_url,
     prospect_role, prospect_type_entreprise, prospect_url, prospect_profile,
     type_entretien, phase_choisie = null, simulation_precedente_id = null, continuite_rdv = null
@@ -1047,10 +1306,14 @@ app.post('/api/simulation/start', async (req, res) => {
   }
 
   try {
-    const { data, error } = await supabaseAdmin.from('simulations').insert({
+    const cached = !simulation_precedente_id && sessionId ? prewarmCache.get(sessionId) : null;
+    const cacheValid = cached && Date.now() - cached.createdAt < PREWARM_TTL_MS;
+
+    const insertPayload = {
       user_id: user.id,
       type_scenario: type_entretien === 'cold_call' ? 'cold_call' : phase_choisie,
-      niveau_difficulte: 'moyen', mode_jeu: 'entrainement', statut: 'preparation',
+      niveau_difficulte: 'moyen', mode_jeu: 'entrainement',
+      statut: cacheValid ? 'en_cours' : 'preparation',
       type_entretien, phase_choisie, b2b_b2c,
       vendeur_type_entreprise: vendeur_type_entreprise?.trim() || null,
       vendeur_produit: vendeur_produit?.trim() || null,
@@ -1061,12 +1324,33 @@ app.post('/api/simulation/start', async (req, res) => {
       prospect_profile: b2b_b2c === 'b2c' ? prospect_profile?.trim() || null : null,
       simulation_precedente_id: simulation_precedente_id || null,
       continuite_rdv: continuite_rdv || null
-    }).select('id').single();
+    };
+
+    if (cacheValid) {
+      insertPayload.persona_complete = cached.persona_complete;
+      insertPayload.prospect_visible_context = cached.prospect_visible_context;
+      const enriched = cached.simulation_enriched;
+      if (enriched) {
+        if (!insertPayload.vendeur_type_entreprise && enriched.vendeur_type_entreprise) insertPayload.vendeur_type_entreprise = enriched.vendeur_type_entreprise;
+        if (!insertPayload.vendeur_produit && enriched.vendeur_produit) insertPayload.vendeur_produit = enriched.vendeur_produit;
+        if (!insertPayload.prospect_type_entreprise && enriched.prospect_type_entreprise) insertPayload.prospect_type_entreprise = enriched.prospect_type_entreprise;
+      }
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('simulations').insert(insertPayload).select('id').single();
 
     if (error) throw error;
-    console.log(`[Supabase] ✅ Simulation créée immédiatement : ${data.id}`);
-    res.json({ simulationId: data.id, status: 'preparation' });
-    ensureSimulationPreparation(data.id);
+
+    if (cacheValid) {
+      prewarmCache.delete(sessionId);
+      console.log(`[Supabase] ✅ Simulation créée (prewarm) : ${data.id}`);
+      res.json({ simulationId: data.id, status: 'en_cours' });
+    } else {
+      console.log(`[Supabase] ✅ Simulation créée (préparation) : ${data.id}`);
+      res.json({ simulationId: data.id, status: 'preparation' });
+      ensureSimulationPreparation(data.id);
+    }
   } catch (err) {
     console.error('[Simulation] Erreur création :', err.stack || err.message);
     res.status(500).json({ error: err.message });
@@ -1106,7 +1390,16 @@ app.get('/api/simulation/:simulationId/audio', async (req, res) => {
   if (authorized.error) return res.status(authorized.error.status).json({ error: authorized.error.message });
 
   const { simulation } = authorized;
-  if (!simulation.url_audio) return res.status(404).json({ error: 'Audio non disponible' });
+
+  if (!simulation.url_audio) {
+    try {
+      const url = await finalizeRecording(simulation.id, simulation.user_id);
+      if (url) return res.json({ signedUrl: url });
+    } catch (err) {
+      console.error('[Audio] Finalize à la volée échoué :', err.message);
+    }
+    return res.status(404).json({ error: 'Audio non disponible' });
+  }
 
   try {
     const pathMatch = simulation.url_audio.match(/simulation-audio\/(.+?)(?:\?|$)/);
@@ -1124,7 +1417,7 @@ app.get('/api/simulation/:simulationId/audio', async (req, res) => {
 });
 
 app.post('/api/simulation/end', async (req, res) => {
-  const { simulationId, dureeSecondes, transcription = [], audioBase64 = null } = req.body;
+  const { simulationId, dureeSecondes, transcription = [] } = req.body;
   if (!simulationId) return res.status(400).json({ error: 'simulationId requis' });
 
   const authorized = await getAuthorizedSimulation(req, simulationId);
@@ -1132,6 +1425,10 @@ app.post('/api/simulation/end', async (req, res) => {
 
   try {
     const { simulation } = authorized;
+
+    if (simulation.statut === 'terminee') {
+      return res.json({ success: true, alreadyTerminated: true });
+    }
 
     const { error: simError } = await supabaseAdmin
       .from('simulations')
@@ -1152,32 +1449,6 @@ app.post('/api/simulation/end', async (req, res) => {
       if (transError) throw transError;
     }
 
-    if (audioBase64) {
-      const cleanBase64 = audioBase64.replace(/^data:audio\/[^;]+;base64,/, '');
-      const audioBuffer = Buffer.from(cleanBase64, 'base64');
-      const audioPath = `${simulation.user_id}/${simulationId}.webm`;
-
-      const { error: uploadError } = await supabaseAdmin.storage
-        .from('simulation-audio')
-        .upload(audioPath, audioBuffer, {
-          contentType: 'audio/webm',
-          cacheControl: '3600',
-          upsert: true
-        });
-      if (uploadError) throw uploadError;
-
-      const { data: signedUrlData, error: signedUrlError } = await supabaseAdmin.storage
-        .from('simulation-audio')
-        .createSignedUrl(audioPath, 60 * 60 * 24 * 365);
-      if (signedUrlError) throw signedUrlError;
-
-      const { error: audioDbError } = await supabaseAdmin
-        .from('simulations')
-        .update({ url_audio: signedUrlData.signedUrl })
-        .eq('id', simulationId);
-      if (audioDbError) throw audioDbError;
-    }
-
     const { data: finalTranscription, error: finalTranscriptionError } = await supabaseAdmin
       .from('transcriptions')
       .select('locuteur, texte, horodatage_secondes')
@@ -1187,10 +1458,77 @@ app.post('/api/simulation/end', async (req, res) => {
 
     await saveQuantitativeMetrics(simulationId, analyzeQuantitative(finalTranscription || []));
 
-    console.log(`[Supabase] ✅ Simulation terminée : ${simulationId}`);
     res.json({ success: true });
+
+    void finalizeRecording(simulationId, simulation.user_id).catch(err => {
+      console.error(`[Recording] Finalize background échoué (${simulationId}):`, err.message);
+    });
+
+    console.log(`[Supabase] ✅ Simulation terminée : ${simulationId}`);
   } catch (err) {
     console.error('[Supabase] Erreur clôture simulation :', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  RECORDING — streaming des chunks audio
+// ════════════════════════════════════════════════════════════════════════════
+
+app.post('/api/recording/chunk', async (req, res) => {
+  const user = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentification requise' });
+
+  const { simulationId, sequence, data } = req.body;
+  if (!simulationId || sequence == null || !data) {
+    return res.status(400).json({ error: 'simulationId, sequence et data requis' });
+  }
+
+  try {
+    maybeCleanupChunks();
+
+    const { data: sim, error: simErr } = await supabaseAdmin
+      .from('simulations').select('user_id, statut').eq('id', simulationId).single();
+    if (simErr || !sim) return res.status(404).json({ error: 'Simulation introuvable' });
+    if (sim.user_id !== user.id) return res.status(403).json({ error: 'Accès refusé' });
+    if (sim.statut === 'terminee' || sim.statut === 'erreur_preparation') {
+      return res.status(409).json({ error: 'Simulation déjà clôturée' });
+    }
+
+    const { error } = await supabaseAdmin
+      .from('recording_chunks')
+      .upsert({
+        simulation_id: simulationId,
+        user_id: user.id,
+        sequence,
+        data
+      }, { onConflict: 'simulation_id,sequence' });
+
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Recording] Erreur chunk :', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/recording/finalize', async (req, res) => {
+  const user = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentification requise' });
+
+  const { simulationId } = req.body;
+  if (!simulationId) return res.status(400).json({ error: 'simulationId requis' });
+
+  try {
+    const { data: sim, error: simErr } = await supabaseAdmin
+      .from('simulations').select('user_id').eq('id', simulationId).single();
+    if (simErr || !sim) return res.status(404).json({ error: 'Simulation introuvable' });
+    if (sim.user_id !== user.id) return res.status(403).json({ error: 'Accès refusé' });
+
+    const url = await finalizeRecording(simulationId, user.id);
+    res.json({ ok: true, url });
+  } catch (err) {
+    console.error('[Recording] Erreur finalize :', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1444,7 +1782,9 @@ RÈGLES IMPÉRATIVES :
 //  IA VOCALE
 // ════════════════════════════════════════════════════════════════════════════
 
-app.get('/api/deepgram-token', (_req, res) => {
+app.get('/api/deepgram-token', async (req, res) => {
+  const user = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentification requise' });
   res.json({ token: process.env.DEEPGRAM_API_KEY });
 });
 
@@ -1545,6 +1885,9 @@ Ne récite jamais le problème supposé du produit.
 });
 
 app.post('/api/tts', async (req, res) => {
+  const user = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentification requise' });
+
   const { text } = req.body;
   if (!text) return res.status(400).json({ error: 'text requis' });
 
